@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Execution Panel (MVP)</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <noscript>需要启用 JavaScript 才能使用。</noscript>
+
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand__title">Execution Panel</div>
+        <div class="brand__subtitle">现在这一刻，我该做什么？</div>
+      </div>
+      <div class="topbar__stats" id="stats"></div>
+    </header>
+
+    <main class="container" id="app" aria-live="polite"></main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+    <div class="modal-root" id="modalRoot" aria-hidden="true"></div>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
+

@@ -1,0 +1,10 @@
+{
+  "name": "Execution Panel (MVP)",
+  "short_name": "ExecPanel",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#0b0d12",
+  "theme_color": "#0b0d12",
+  "description": "最小执行面板：只展示一个任务，直接开始，用倒计时+即时反馈对抗拖延。"
+}
+
