@@ -8,10 +8,24 @@ const modalRoot = document.getElementById("modalRoot");
 const state = {
   data: loadData(),
   view: "home", // home | tasks | focus | settings | sops
-  session: null, // { taskId, startedAt, endsAt, openLinks, useSop, definitionOfDone, estimateMin, sopKey }
+  session: null, // { taskId, startedAt, endsAt, openLinks, useSop, definitionOfDone, estimateMin, sopKey, practiceFocus }
 };
 
 let focusTicker = null;
+
+const FAIL_REASONS = [
+  { code: "difficulty_misjudge", label: "难度判断失误" },
+  { code: "interrupted", label: "专注被打断" },
+  { code: "sop_bad", label: "SOP 不合理" },
+  { code: "goal_unclear", label: "目标不清晰" },
+  { code: "bad_state", label: "就是状态不好" },
+];
+
+const SELF_COMPARE_OPTIONS = [
+  { code: "better", label: "明显更好" },
+  { code: "same", label: "差不多" },
+  { code: "worse", label: "更差" },
+];
 
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -123,7 +137,7 @@ function deleteTask(taskId) {
   persist();
 }
 
-function openModal({ title, body, footer, onClose }) {
+function openModal({ title, body, footer, onClose, dismissible = true }) {
   modalRoot.setAttribute("aria-hidden", "false");
   modalRoot.replaceChildren(
     h(
@@ -133,18 +147,16 @@ function openModal({ title, body, footer, onClose }) {
         role: "dialog",
         "aria-modal": "true",
         onkeydown: (e) => {
-          if (e.key === "Escape") closeModal();
+          if (dismissible && e.key === "Escape") closeModal();
         },
       },
       h(
         "div",
         { class: "modalHeader" },
         h("div", { class: "modalTitle", text: title || "" }),
-        h(
-          "button",
-          { class: "btn btn--ghost", onclick: () => closeModal() },
-          "关闭"
-        )
+        dismissible
+          ? h("button", { class: "btn btn--ghost", onclick: () => closeModal() }, "关闭")
+          : null
       ),
       h("div", { class: "divider" }),
       body,
@@ -159,11 +171,176 @@ function openModal({ title, body, footer, onClose }) {
     if (typeof onClose === "function") onClose();
   }
 
-  modalRoot.onclick = (e) => {
-    if (e.target === modalRoot) closeModal();
-  };
+  if (dismissible) {
+    modalRoot.onclick = (e) => {
+      if (e.target === modalRoot) closeModal();
+    };
+  } else {
+    modalRoot.onclick = null;
+  }
 
   return { close: closeModal };
+}
+
+function capArrayTail(arr, maxLen) {
+  const a = Array.isArray(arr) ? arr : [];
+  if (a.length <= maxLen) return a;
+  return a.slice(a.length - maxLen);
+}
+
+function appendPracticeSession(session) {
+  if (!session || typeof session !== "object") return;
+  state.data.sessions = capArrayTail([...(state.data.sessions || []), session], 200);
+  persist();
+}
+
+function updatePracticeSession(sessionId, patch) {
+  const id = String(sessionId || "");
+  if (!id) return;
+  const idx = (state.data.sessions || []).findIndex((s) => s && s.id === id);
+  if (idx < 0) return;
+  state.data.sessions[idx] = { ...state.data.sessions[idx], ...(patch || {}) };
+  persist();
+}
+
+function openFailReasonModal({ title, onSubmit }) {
+  let selected = "";
+  const list = h(
+    "div",
+    { class: "col" },
+    ...FAIL_REASONS.map((r) =>
+      h(
+        "label",
+        { class: "check" },
+        h("input", {
+          type: "radio",
+          name: "failReason",
+          value: r.code,
+          onchange: (e) => {
+            selected = e.target.value;
+            confirmBtn.disabled = !selected;
+          },
+        }),
+        h("div", {}, h("div", { class: "taskTitle", text: r.label }))
+      )
+    )
+  );
+
+  const confirmBtn = h(
+    "button",
+    {
+      class: "btn btn--primary",
+      disabled: "disabled",
+      onclick: () => {
+        if (!selected) return;
+        ctrl.close();
+        onSubmit?.(selected);
+      },
+    },
+    "确认"
+  );
+  const footer = h("div", { class: "buttons" }, confirmBtn);
+  const ctrl = openModal({
+    title: title || "这次没完成，主要原因是？（必选）",
+    body: list,
+    footer,
+    dismissible: false,
+  });
+}
+
+function openSuccessSettleModal({ sessionId, sopKey, taskTitle }) {
+  let selectedCompare = "";
+  let compareApplied = false;
+
+  const compareBlock = h(
+    "div",
+    { class: "col" },
+    h("div", { class: "muted" }, "和上一次同类任务相比，这次感觉如何？（可跳过）"),
+    ...SELF_COMPARE_OPTIONS.map((o) =>
+      h(
+        "label",
+        { class: "check" },
+        h("input", {
+          type: "radio",
+          name: "selfCompare",
+          value: o.code,
+          onchange: (e) => {
+            selectedCompare = e.target.value;
+          },
+        }),
+        h("div", {}, h("div", { class: "taskTitle", text: o.label }))
+      )
+    )
+  );
+
+  const suggestedKey = String(sopKey || taskTitle || "").trim();
+  const keyInput = h("input", {
+    value: suggestedKey,
+    placeholder: "例如：发布公众号 / 报销 / 剪辑视频（同类任务用同一项）",
+  });
+  const existing = Array.isArray(state.data.sops[suggestedKey]) ? state.data.sops[suggestedKey] : [];
+  const textarea = h("textarea", {
+    placeholder: "每行一个步骤；可用前缀：!注意 / @检查 / ↑提升点（可不写）",
+    text: existing.join("\n"),
+  });
+
+  const body = h(
+    "div",
+    { class: "col" },
+    compareBlock,
+    h("div", { class: "divider" }),
+    h("div", { class: "muted" }, "要把本次步骤沉淀为 SOP 吗？（可跳过）"),
+    h("div", {}, h("label", { text: "事项（SOP 名称）" }), keyInput),
+    textarea
+  );
+
+  function applyCompareIfAny() {
+    if (!selectedCompare || compareApplied) return;
+    compareApplied = true;
+    updatePracticeSession(sessionId, { selfCompare: selectedCompare });
+  }
+
+  const footer = h(
+    "div",
+    { class: "buttons" },
+    h(
+      "button",
+      {
+        class: "btn btn--primary",
+        onclick: () => {
+          const key = keyInput.value.trim();
+          if (!key) {
+            toast("事项不能为空");
+            keyInput.focus();
+            return;
+          }
+          const steps = textarea.value
+            .split(/\r?\n/g)
+            .map((s) => s.trim())
+            .filter(Boolean);
+          state.data.sops[key] = steps;
+          persist();
+          applyCompareIfAny();
+          ctrl.close();
+          toast(steps.length ? "SOP 已保存" : "SOP 已清空");
+        },
+      },
+      "保存 SOP 并结束"
+    ),
+    h(
+      "button",
+      {
+        class: "btn",
+        onclick: () => {
+          applyCompareIfAny();
+          ctrl.close();
+        },
+      },
+      "不保存，结束"
+    )
+  );
+
+  const ctrl = openModal({ title: "完成结算", body, footer, onClose: applyCompareIfAny });
 }
 
 function openLinkHub(links, title) {
@@ -423,6 +600,12 @@ function openStartConfirm(task) {
   const useSopInput = h("input", { type: "checkbox" });
   const sopCountEl = h("div", { class: "muted" });
 
+  const practiceFocusInput = h("input", {
+    value: task.lastPracticeFocus || "",
+    maxlength: "60",
+    placeholder: "一句话：这次刻意练什么？例如：结尾更有力量",
+  });
+
   const body = h(
     "div",
     { class: "col" },
@@ -468,6 +651,10 @@ function openStartConfirm(task) {
   );
 
   body.appendChild(h("div", { class: "divider" }));
+  body.insertBefore(
+    h("div", {}, h("label", { text: "练习目标（Practice Focus，可选）" }), practiceFocusInput),
+    body.lastChild
+  );
   body.appendChild(sopKeyRow);
   body.appendChild(openLinksRow);
   body.appendChild(useSopRow);
@@ -504,6 +691,7 @@ function openStartConfirm(task) {
             estimateMin,
             definitionOfDone,
             sopKey,
+            practiceFocus: practiceFocusInput.value.trim().slice(0, 60),
             openLinks: Boolean(openLinksInput.checked && hasLinks),
             useSop: Boolean(useSopInput.checked && !useSopInput.disabled),
           });
@@ -545,6 +733,7 @@ function startSession(taskId, opts) {
     definitionOfDone: opts.definitionOfDone,
     estimateMin: opts.estimateMin,
     sopKey: opts.sopKey,
+    practiceFocus: typeof opts.practiceFocus === "string" ? opts.practiceFocus.trim().slice(0, 60) : "",
   };
 
   // Sync task fields so next time it’s easier to start.
@@ -553,6 +742,10 @@ function startSession(taskId, opts) {
     estimateMin: opts.estimateMin,
     definitionOfDone: opts.definitionOfDone,
     sopKey: opts.sopKey,
+    lastPracticeFocus:
+      typeof opts.practiceFocus === "string" && opts.practiceFocus.trim()
+        ? opts.practiceFocus.trim().slice(0, 60)
+        : task.lastPracticeFocus || "",
     updatedAt: new Date().toISOString(),
   });
 
@@ -570,7 +763,6 @@ function settleSuccess(taskId) {
   persist();
   toast(`完成 +${state.data.settings.completePoints}`);
 
-  maybePromptSaveSop(task);
 }
 
 function settleFail(taskId, reason) {
@@ -1045,6 +1237,24 @@ function renderFocus() {
   });
   noteInput.addEventListener("blur", saveDraftNow);
 
+  function buildPracticeSessionBase(endedAtMsOverride) {
+    const endedAtMs = Number.isFinite(endedAtMsOverride) ? endedAtMsOverride : Date.now();
+    const startedAtIso = new Date(sess.startedAt).toISOString();
+    const endedAtIso = new Date(endedAtMs).toISOString();
+    const actualSec = Math.max(0, Math.round((endedAtMs - sess.startedAt) / 1000));
+    return {
+      id: newId("s"),
+      taskId: sess.taskId,
+      sopKey: sopKey,
+      taskType: task.type,
+      startedAt: startedAtIso,
+      endedAt: endedAtIso,
+      plannedMin: Number(sess.estimateMin || 0),
+      actualSec,
+      practiceFocus: (sess.practiceFocus || "").trim(),
+    };
+  }
+
   const completeBtn = h(
     "button",
     {
@@ -1073,9 +1283,12 @@ function renderFocus() {
           saveDraftNow();
         }
         stopFocusTicker();
+        const srec = { ...buildPracticeSessionBase(), result: "success" };
+        appendPracticeSession(srec);
         settleSuccess(task.id);
         state.session = null;
         setView("home");
+        openSuccessSettleModal({ sessionId: srec.id, sopKey, taskTitle: task.title });
       },
     },
     "完成"
@@ -1089,9 +1302,18 @@ function renderFocus() {
         if (!ok) return;
         saveDraftNow();
         stopFocusTicker();
-        settleFail(task.id, "放弃，判定失败");
-        state.session = null;
-        setView("home");
+        const endedAtMs = Date.now();
+        openFailReasonModal({
+          title: "这次没完成，主要原因是？（必选）",
+          onSubmit: (failReason) => {
+            const label = FAIL_REASONS.find((r) => r.code === failReason)?.label || failReason;
+            const frec = { ...buildPracticeSessionBase(endedAtMs), result: "fail", failReason, failTrigger: "abandon" };
+            appendPracticeSession(frec);
+            settleFail(task.id, `失败 ${state.data.settings.failPoints}：${label}`);
+            state.session = null;
+            setView("home");
+          },
+        });
       },
     },
     "放弃"
@@ -1134,6 +1356,9 @@ function renderFocus() {
       h("div", { class: "muted" }, "执行态（无暂停）"),
       timerEl,
       h("div", { class: "h1", text: task.title }),
+      (sess.practiceFocus || "").trim()
+        ? h("div", { class: "muted" }, `🎯 本次练习重点：${(sess.practiceFocus || "").trim()}`)
+        : null,
       h("div", { class: "muted" }, dod),
       getLinks(task).length
         ? h(
@@ -1195,10 +1420,19 @@ function renderFocus() {
     if (left <= 0) {
       saveDraftNow();
       stopFocusTicker();
-      settleFail(task.id, "时间到，判定失败");
-      state.session = null;
-      setView("home");
-      document.title = "Execution Panel (MVP)";
+      const endedAtMs = Date.now();
+      openFailReasonModal({
+        title: "时间到了，主要原因是？（必选）",
+        onSubmit: (failReason) => {
+          const label = FAIL_REASONS.find((r) => r.code === failReason)?.label || failReason;
+          const frec = { ...buildPracticeSessionBase(endedAtMs), result: "fail", failReason, failTrigger: "timeout" };
+          appendPracticeSession(frec);
+          settleFail(task.id, `失败 ${state.data.settings.failPoints}：${label}`);
+          state.session = null;
+          setView("home");
+          document.title = "Execution Panel (MVP)";
+        },
+      });
     }
   }, 250);
 

@@ -6,10 +6,12 @@ function nowIso() {
 
 function defaultData() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     tasks: [],
     // Map: sopKey -> steps[]
     sops: {},
+    // Practice sessions history (append-only; keep last N in UI/service layer).
+    sessions: [],
     stats: {
       points: 0,
       streak: 0,
@@ -35,7 +37,7 @@ function sanitizeLoadedData(raw) {
   if (!raw || typeof raw !== "object") return base;
 
   const out = { ...base, ...raw };
-  out.schemaVersion = 1;
+  out.schemaVersion = 2;
 
   out.stats = {
     points: coerceInt(raw?.stats?.points, base.stats.points),
@@ -77,6 +79,8 @@ function sanitizeLoadedData(raw) {
           ? [t.url.trim()]
           : [],
     definitionOfDone: typeof t.definitionOfDone === "string" ? t.definitionOfDone.trim() : "",
+    // Optional "practice focus" shortcut for next time.
+    lastPracticeFocus: typeof t.lastPracticeFocus === "string" ? t.lastPracticeFocus.trim() : "",
     // SOP is associated by "事项"/key (user-controlled); fallback can be task title on UI.
     sopKey: typeof t.sopKey === "string" ? t.sopKey.trim() : "",
     notes: Array.isArray(t.notes)
@@ -98,6 +102,27 @@ function sanitizeLoadedData(raw) {
   }));
   out.tasks = out.tasks.filter((t) => t.title.length > 0 && t.id.length > 0);
 
+  out.sessions = Array.isArray(raw?.sessions)
+    ? raw.sessions.filter((s) => s && typeof s === "object")
+    : [];
+  out.sessions = out.sessions
+    .map((s) => ({
+      id: String(s.id || ""),
+      taskId: String(s.taskId || ""),
+      sopKey: typeof s.sopKey === "string" ? s.sopKey.trim() : "",
+      taskType: s.taskType === "repeat" || s.taskType === "light" ? s.taskType : "deep",
+      startedAt: typeof s.startedAt === "string" ? s.startedAt : "",
+      endedAt: typeof s.endedAt === "string" ? s.endedAt : "",
+      plannedMin: coerceInt(s.plannedMin, 0),
+      actualSec: coerceInt(s.actualSec, 0),
+      result: s.result === "fail" ? "fail" : s.result === "success" ? "success" : "",
+      practiceFocus: typeof s.practiceFocus === "string" ? s.practiceFocus.trim() : "",
+      failReason: typeof s.failReason === "string" ? s.failReason : "",
+      failTrigger: typeof s.failTrigger === "string" ? s.failTrigger : "",
+      selfCompare: typeof s.selfCompare === "string" ? s.selfCompare : "",
+    }))
+    .filter((s) => s.id.length > 0 && s.taskId.length > 0 && (s.result === "success" || s.result === "fail"));
+
   out.lastTaskOrder = coerceInt(raw?.lastTaskOrder, base.lastTaskOrder);
   out.updatedAt = typeof raw?.updatedAt === "string" ? raw.updatedAt : nowIso();
 
@@ -116,7 +141,7 @@ export function loadData() {
 }
 
 export function saveData(data) {
-  const out = { ...data, updatedAt: nowIso(), schemaVersion: 1 };
+  const out = { ...data, updatedAt: nowIso(), schemaVersion: 2 };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(out));
 }
 
