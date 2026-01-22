@@ -25,7 +25,29 @@
 
     <div class="modal-root" id="modalRoot" aria-hidden="true"></div>
 
-    <script type="module" src="app.js"></script>
+    <script>
+      // If the module script fails to load (common when opened via file:// or bad caching),
+      // show a visible hint instead of a blank page.
+      window.__APP_BOOT__ = { ok: false, startedAt: Date.now() };
+      window.setTimeout(() => {
+        if (window.__APP_BOOT__ && window.__APP_BOOT__.ok) return;
+        const app = document.getElementById("app");
+        if (!app) return;
+        app.innerHTML =
+          '<div class="card"><div class="h1">页面没有加载成功</div>' +
+          '<div class="muted">请用本地静态服务器打开（例如：python -m http.server 5173，然后访问 http://localhost:5173/），并在 DevTools Console 查看报错。</div>' +
+          "</div>";
+      }, 800);
+    </script>
+    <script type="module">
+      try {
+        await import("./app.js");
+        window.__APP_BOOT__.ok = true;
+      } catch (e) {
+        window.__APP_BOOT__.ok = false;
+        // Surface error in console for debugging.
+        console.error("[boot] failed to load app.js", e);
+      }
+    </script>
   </body>
 </html>
-

@@ -116,6 +116,140 @@ function getLinks(task) {
   return Array.isArray(task?.links) ? task.links : [];
 }
 
+function normalizeLinks(list) {
+  const seen = new Set();
+  const out = [];
+  for (const v of Array.isArray(list) ? list : []) {
+    if (typeof v !== "string") continue;
+    const s = v.trim();
+    if (!s) continue;
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+function toOpenableUrl(raw) {
+  const s0 = String(raw || "").trim();
+  if (!s0) return null;
+
+  // If it already has a scheme, keep it as-is (http:, https:, mailto:, etc.)
+  const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(s0);
+  const isLikelyLocal =
+    /^(localhost)([:/]|$)/i.test(s0) ||
+    /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(s0);
+  const candidate = hasScheme ? s0 : `${isLikelyLocal ? "http" : "https"}://${s0.replace(/^\/\//, "")}`;
+
+  try {
+    return new URL(candidate).toString();
+  } catch {
+    // Fall back: if it looked like a URL but was malformed, refuse to open (avoid about:blank).
+    return null;
+  }
+}
+
+function sanitizeOpenableLinks(list) {
+  const valid = [];
+  const invalid = [];
+  for (const v of normalizeLinks(list)) {
+    const u = toOpenableUrl(v);
+    if (u) valid.push(u);
+    else invalid.push(v);
+  }
+  return { valid: normalizeLinks(valid), invalid };
+}
+
+function openUrls(list, title) {
+  const { valid, invalid } = sanitizeOpenableLinks(list);
+  if (invalid.length) toast(`有 ${invalid.length} 个链接格式不对，已跳过`);
+  if (!valid.length) return false;
+
+  if (valid.length === 1) {
+    return Boolean(window.open(valid[0], "_blank", "noopener,noreferrer") || toast("弹窗被拦截：请允许弹窗"));
+  }
+
+  // Try open a single hub window; even if blocked, we still show in-app list.
+  openLinkHub(valid, title) || toast("弹窗被拦截：已在页面内提供链接列表");
+  openLinksUI(valid, "打开链接（列表）");
+  return true;
+}
+
+// Stable (Edge-friendly) link opening:
+// - Never auto-open new tabs/windows (popup blockers are unpredictable).
+// - Show an in-app list; each link is opened by an explicit user click (<a target=_blank>).
+function openLinksUIStable(links, title) {
+  const { valid, invalid } = sanitizeOpenableLinks(links);
+  if (invalid.length) toast(`有 ${invalid.length} 个链接格式不对，已跳过`);
+  if (!valid.length) {
+    toast("没有可打开的链接");
+    return;
+  }
+
+  const body = h(
+    "div",
+    { class: "col" },
+    h("div", { class: "muted" }, "Edge 可能会拦截弹窗；更稳的方式是：在这里逐个点击打开链接。"),
+    h(
+      "div",
+      { class: "buttons" },
+      h("button", { class: "btn btn--primary", onclick: () => copyToClipboard(valid.join("\n")) }, "复制全部链接"),
+      h(
+        "button",
+        { class: "btn", onclick: () => openLinkHub(valid, title) || toast("已被浏览器拦截：请在 Edge 允许此站点的弹窗") },
+        "尝试新标签面板"
+      )
+    ),
+    h("div", { class: "divider" }),
+    h(
+      "div",
+      { class: "list" },
+      ...valid.map((u) =>
+        h(
+          "div",
+          { class: "card" },
+          h("div", { class: "muted" }, u),
+          h(
+            "div",
+            { class: "buttons" },
+            h("a", { class: "btn btn--primary", href: u, target: "_blank", rel: "noopener noreferrer" }, "打开"),
+            h("button", { class: "btn", onclick: () => copyToClipboard(u) }, "复制")
+          )
+        )
+      )
+    )
+  );
+
+  openModal({ title: title || "链接", body });
+}
+
+function openUrlsStable(list, title) {
+  const { valid, invalid } = sanitizeOpenableLinks(list);
+  if (invalid.length) toast(`有 ${invalid.length} 个链接格式不对，已跳过`);
+  if (!valid.length) {
+    toast("没有可打开的链接");
+    return false;
+  }
+  openLinksUIStable(valid, title || "打开链接");
+  return true;
+}
+
+function getSopLinks(sopKey) {
+  const key = String(sopKey || "").trim();
+  if (!key) return [];
+  return normalizeLinks(state.data?.sopLinks?.[key]);
+}
+
+function shouldAutoOpenSopLinks(sopKey) {
+  const key = String(sopKey || "").trim();
+  if (!key) return false;
+  return Boolean(state.data?.sopAutoOpenLinks?.[key]);
+}
+
+function getEffectiveLinks(task, sopKey) {
+  return normalizeLinks([...getLinks(task), ...getSopLinks(sopKey)]);
+}
+
 function getRecommendedTask() {
   const todos = sortTodos(state.data.tasks);
   return todos.length ? todos[0] : null;
@@ -255,7 +389,13 @@ function openSuccessSettleModal({ sessionId, sopKey, taskTitle }) {
   const compareBlock = h(
     "div",
     { class: "col" },
-    h("div", { class: "muted" }, "和上一次同类任务相比，这次感觉如何？（可跳过）"),
+    h(
+      "div",
+      { class: "muted" },
+      String(sopKey || "").trim()
+        ? `和上一次同事项（${String(sopKey || "").trim()}）相比，这次感觉如何？（可跳过）`
+        : "和上一次同类任务相比，这次感觉如何？（可跳过）"
+    ),
     ...SELF_COMPARE_OPTIONS.map((o) =>
       h(
         "label",
@@ -276,7 +416,7 @@ function openSuccessSettleModal({ sessionId, sopKey, taskTitle }) {
   const suggestedKey = String(sopKey || taskTitle || "").trim();
   const keyInput = h("input", {
     value: suggestedKey,
-    placeholder: "例如：发布公众号 / 报销 / 剪辑视频（同类任务用同一项）",
+    placeholder: "例如：发布公众号 / 报销 / 剪辑视频（同事项用同一项）",
   });
   const existing = Array.isArray(state.data.sops[suggestedKey]) ? state.data.sops[suggestedKey] : [];
   const textarea = h("textarea", {
@@ -346,19 +486,37 @@ function openSuccessSettleModal({ sessionId, sopKey, taskTitle }) {
 function openLinkHub(links, title) {
   // Only 1 popup: show a link list page so user can open many links with explicit clicks.
   // This avoids browsers blocking multiple window.open() calls.
-  const w = window.open("", "_blank", "noopener,noreferrer");
-  if (!w) return false;
-  const safeTitle = String(title || "链接面板").replace(/[<>]/g, "");
-  const items = links
-    .map((u) => String(u).trim())
-    .filter(Boolean)
-    .map((u) => {
-      const escaped = u.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      return `<li><a href="${escaped}" target="_blank" rel="noopener noreferrer">${escaped}</a></li>`;
-    })
-    .join("");
-  w.document.open();
-  w.document.write(`<!doctype html>
+  const { valid, invalid } = sanitizeOpenableLinks(links);
+  if (!valid.length) return false;
+
+  // NOTE: do NOT use "noopener,noreferrer" here, otherwise some browsers
+  // will prevent scripting access to the newly opened about:blank window,
+  // leaving users stuck on a blank about:blank tab.
+  let w = null;
+  try {
+    w = window.open("", "_blank");
+    if (!w) return false;
+
+    const safeTitle = String(title || "链接面板").replace(/[<>]/g, "");
+    const items = valid
+      .map((u) => {
+        const escaped = u.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        return `<li><a href="${escaped}" target="_blank" rel="noopener noreferrer">${escaped}</a></li>`;
+      })
+      .join("");
+    const invalidItems = invalid.length
+      ? invalid
+          .map((u) => String(u).trim())
+          .filter(Boolean)
+          .map((u) => {
+            const escaped = u.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            return `<li><span class="muted">⚠ 无法识别链接：${escaped}</span></li>`;
+          })
+          .join("")
+      : "";
+
+    w.document.open();
+    w.document.write(`<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${safeTitle}</title>
 <style>
@@ -376,7 +534,7 @@ function openLinkHub(links, title) {
   <div class="bar">
     <button id="openAll">尝试打开全部（可能被拦截）</button>
   </div>
-  <ul id="list">${items}</ul>
+  <ul id="list">${items}${invalidItems}</ul>
   <script>
     const links = Array.from(document.querySelectorAll('#list a')).map(a=>a.href);
     document.getElementById('openAll').onclick = () => {
@@ -389,11 +547,25 @@ function openLinkHub(links, title) {
     };
   </script>
 </body></html>`);
-  w.document.close();
-  return true;
+    w.document.close();
+    return true;
+  } catch (e) {
+    try {
+      if (w && typeof w.close === "function") w.close();
+    } catch {}
+    console.error("[openLinkHub] failed", e);
+    return false;
+  }
 }
 
 function openLinksUI(links, title) {
+  const { valid, invalid } = sanitizeOpenableLinks(links);
+  if (invalid.length) toast(`有 ${invalid.length} 个链接格式不对，已跳过`);
+  if (!valid.length) {
+    toast("没有可打开的链接");
+    return;
+  }
+
   const body = h(
     "div",
     { class: "col" },
@@ -403,12 +575,12 @@ function openLinksUI(links, title) {
       { class: "buttons" },
       h(
         "button",
-        { class: "btn btn--primary", onclick: () => openLinkHub(links, title) || toast("弹窗被拦截：请允许弹窗") },
+        { class: "btn btn--primary", onclick: () => openLinkHub(valid, title) || toast("弹窗被拦截：请允许弹窗") },
         "打开链接面板（推荐）"
       ),
       h(
         "button",
-        { class: "btn", onclick: () => copyToClipboard(links.join("\n")) },
+        { class: "btn", onclick: () => copyToClipboard(valid.join("\n")) },
         "复制全部链接"
       )
     ),
@@ -416,7 +588,7 @@ function openLinksUI(links, title) {
     h(
       "div",
       { class: "list" },
-      ...links.map((u) =>
+      ...valid.map((u) =>
         h(
           "div",
           { class: "card" },
@@ -592,10 +764,15 @@ function openStartConfirm(task) {
     placeholder: "可选：填写后，同类任务可复用同一 SOP",
   });
 
-  const links = getLinks(task);
-  const hasLinks = links.length > 0;
-  const openLinksInput = h("input", { type: "checkbox", checked: hasLinks ? "checked" : null });
-  openLinksInput.disabled = !hasLinks;
+  let openLinksTouched = false;
+  const openLinksInput = h("input", { type: "checkbox" });
+  openLinksInput.addEventListener("change", () => {
+    openLinksTouched = true;
+  });
+  const linkMetaEl = h("div", { class: "muted" });
+
+  const rememberAutoOpenInput = h("input", { type: "checkbox" });
+  const autoOpenMetaEl = h("div", { class: "muted" });
 
   const useSopInput = h("input", { type: "checkbox" });
   const sopCountEl = h("div", { class: "muted" });
@@ -635,7 +812,18 @@ function openStartConfirm(task) {
       "div",
       {},
       h("div", { class: "taskTitle", text: "进入执行态时自动打开链接" }),
-      h("div", { class: "muted" }, hasLinks ? `${links.length} 个链接` : "未设置链接")
+      linkMetaEl
+    )
+  );
+  const rememberAutoOpenRow = h(
+    "div",
+    { class: "check" },
+    rememberAutoOpenInput,
+    h(
+      "div",
+      {},
+      h("div", { class: "taskTitle", text: "该事项下次默认自动打开链接（记住）" }),
+      autoOpenMetaEl
     )
   );
   const useSopRow = h(
@@ -657,10 +845,39 @@ function openStartConfirm(task) {
   );
   body.appendChild(sopKeyRow);
   body.appendChild(openLinksRow);
+  body.appendChild(rememberAutoOpenRow);
   body.appendChild(useSopRow);
 
-  function syncSopAvailability() {
+  function syncSopMeta() {
     const key = (sopKeyInput.value || task.title).trim();
+
+    const taskLinks = getLinks(task);
+    const sopLinks = getSopLinks(key);
+    const effectiveLinks = normalizeLinks([...taskLinks, ...sopLinks]);
+    const hasEffectiveLinks = effectiveLinks.length > 0;
+
+    openLinksInput.disabled = !hasEffectiveLinks;
+    if (!hasEffectiveLinks) openLinksInput.checked = false;
+
+    const srcParts = [];
+    if (taskLinks.length) srcParts.push(`任务 ${taskLinks.length}`);
+    if (sopLinks.length) srcParts.push(`SOP 共享 ${sopLinks.length}`);
+    linkMetaEl.textContent = hasEffectiveLinks
+      ? `可打开 ${effectiveLinks.length} 个（${srcParts.join(" + ") || "无"}）`
+      : "暂无可打开链接";
+
+    rememberAutoOpenInput.disabled = !key;
+    if (key) {
+      const isAutoOpen = shouldAutoOpenSopLinks(key);
+      rememberAutoOpenInput.checked = isAutoOpen;
+      autoOpenMetaEl.textContent = isAutoOpen ? "已启用：该事项以后默认勾选“自动打开链接”" : "未启用：该事项不会默认勾选";
+      if (!openLinksTouched) openLinksInput.checked = hasEffectiveLinks && (isAutoOpen || taskLinks.length > 0);
+    } else {
+      rememberAutoOpenInput.checked = false;
+      autoOpenMetaEl.textContent = "仅对事项生效";
+      if (!openLinksTouched) openLinksInput.checked = hasEffectiveLinks && taskLinks.length > 0;
+    }
+
     const steps = Array.isArray(state.data.sops[key]) ? state.data.sops[key] : [];
     if (steps.length) {
       useSopInput.disabled = false;
@@ -673,8 +890,17 @@ function openStartConfirm(task) {
       sopCountEl.textContent = "该事项还没有 SOP";
     }
   }
-  sopKeyInput.addEventListener("input", syncSopAvailability);
-  syncSopAvailability();
+  sopKeyInput.addEventListener("input", syncSopMeta);
+  syncSopMeta();
+
+  rememberAutoOpenInput.addEventListener("change", () => {
+    const key = (sopKeyInput.value || task.title).trim();
+    if (!key) return;
+    if (!state.data.sopAutoOpenLinks || typeof state.data.sopAutoOpenLinks !== "object") state.data.sopAutoOpenLinks = {};
+    state.data.sopAutoOpenLinks[key] = Boolean(rememberAutoOpenInput.checked);
+    persist();
+    syncSopMeta();
+  });
 
   const footer = h(
     "div",
@@ -692,7 +918,8 @@ function openStartConfirm(task) {
             definitionOfDone,
             sopKey,
             practiceFocus: practiceFocusInput.value.trim().slice(0, 60),
-            openLinks: Boolean(openLinksInput.checked && hasLinks),
+            openLinks: Boolean(openLinksInput.checked && getEffectiveLinks(task, sopKey).length),
+            rememberAutoOpenLinks: Boolean(rememberAutoOpenInput.checked),
             useSop: Boolean(useSopInput.checked && !useSopInput.disabled),
           });
           ctrl.close();
@@ -710,16 +937,23 @@ function startSession(taskId, opts) {
   const task = state.data.tasks.find((t) => t.id === taskId);
   if (!task || task.status !== "todo") return;
 
-  const links = getLinks(task);
+  const sopKey = String(opts?.sopKey || "").trim();
+
+  // Accumulate task-level links into SOP-level reusable links (so same sopKey tasks can reuse them).
+  if (sopKey && getLinks(task).length) {
+    if (!state.data.sopLinks || typeof state.data.sopLinks !== "object") state.data.sopLinks = {};
+    const merged = normalizeLinks([...getSopLinks(sopKey), ...getLinks(task)]);
+    if (merged.length) state.data.sopLinks[sopKey] = merged;
+  }
+
+  if (sopKey && typeof opts?.rememberAutoOpenLinks === "boolean") {
+    if (!state.data.sopAutoOpenLinks || typeof state.data.sopAutoOpenLinks !== "object") state.data.sopAutoOpenLinks = {};
+    state.data.sopAutoOpenLinks[sopKey] = Boolean(opts.rememberAutoOpenLinks);
+  }
+
+  const links = getEffectiveLinks(task, sopKey);
   if (opts.openLinks && links.length) {
-    // Most browsers block "open many tabs" on one click; prefer a 1-popup hub + in-app list.
-    if (links.length === 1) {
-      window.open(links[0], "_blank", "noopener,noreferrer");
-    } else {
-      // Try open a single hub window; even if blocked, we still show in-app list.
-      openLinkHub(links, `链接面板：${task.title}`) || toast("弹窗被拦截：已在页面内提供链接列表");
-      openLinksUI(links, "打开链接（列表）");
-    }
+    openUrlsStable(links, `Links: ${task.title}`);
   }
 
   const startedAt = Date.now();
@@ -732,7 +966,7 @@ function startSession(taskId, opts) {
     useSop: opts.useSop,
     definitionOfDone: opts.definitionOfDone,
     estimateMin: opts.estimateMin,
-    sopKey: opts.sopKey,
+    sopKey: sopKey,
     practiceFocus: typeof opts.practiceFocus === "string" ? opts.practiceFocus.trim().slice(0, 60) : "",
   };
 
@@ -741,7 +975,7 @@ function startSession(taskId, opts) {
     ...task,
     estimateMin: opts.estimateMin,
     definitionOfDone: opts.definitionOfDone,
-    sopKey: opts.sopKey,
+    sopKey: sopKey,
     lastPracticeFocus:
       typeof opts.practiceFocus === "string" && opts.practiceFocus.trim()
         ? opts.practiceFocus.trim().slice(0, 60)
@@ -1044,7 +1278,8 @@ function renderSettings() {
   );
 }
 
-function renderSops() {
+// Legacy SOP list page (kept for reference; replaced by SOP-key Hub below).
+function renderSopsLegacy() {
   const entries = Object.entries(state.data.sops || {}).sort((a, b) => a[0].localeCompare(b[0], "zh-Hans-CN"));
 
   function openSopEditor({ key, steps, mode }) {
@@ -1160,6 +1395,263 @@ function renderSops() {
   );
 }
 
+// SOP-key Hub: manage SOP steps + shared links + auto-open by "事项(sopKey)"
+// Note: This overrides the legacy `renderSops()` defined earlier in this file.
+function renderSops() {
+  function openLinksQuick(list, title) {
+    openUrlsStable(list, title);
+  }
+
+  function ensureMaps() {
+    if (!state.data.sops || typeof state.data.sops !== "object") state.data.sops = {};
+    if (!state.data.sopLinks || typeof state.data.sopLinks !== "object") state.data.sopLinks = {};
+    if (!state.data.sopAutoOpenLinks || typeof state.data.sopAutoOpenLinks !== "object") state.data.sopAutoOpenLinks = {};
+  }
+
+  function collectAllSopKeys() {
+    const out = new Set();
+    for (const k of Object.keys(state.data.sops || {})) out.add(String(k || "").trim());
+    for (const k of Object.keys(state.data.sopLinks || {})) out.add(String(k || "").trim());
+    for (const k of Object.keys(state.data.sopAutoOpenLinks || {})) out.add(String(k || "").trim());
+    for (const t of state.data.tasks || []) {
+      const k = String(t?.sopKey || "").trim();
+      if (k) out.add(k);
+    }
+    return Array.from(out).filter(Boolean).sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+  }
+
+  function renameSopKeyEverywhere(oldKey, nextKey) {
+    const from = String(oldKey || "").trim();
+    const to = String(nextKey || "").trim();
+    if (!from || !to || from === to) return;
+
+    if (state.data.sops?.[from] !== undefined) {
+      state.data.sops[to] = state.data.sops[from];
+      delete state.data.sops[from];
+    }
+    if (state.data.sopLinks?.[from] !== undefined) {
+      state.data.sopLinks[to] = normalizeLinks(state.data.sopLinks[from]);
+      delete state.data.sopLinks[from];
+    }
+    if (state.data.sopAutoOpenLinks?.[from] !== undefined) {
+      state.data.sopAutoOpenLinks[to] = Boolean(state.data.sopAutoOpenLinks[from]);
+      delete state.data.sopAutoOpenLinks[from];
+    }
+
+    // Keep tasks consistent (best-effort)
+    for (const t of state.data.tasks || []) {
+      if (String(t?.sopKey || "").trim() === from) {
+        t.sopKey = to;
+        t.updatedAt = new Date().toISOString();
+      }
+    }
+  }
+
+  function deleteSopKeyAssets(key) {
+    const k = String(key || "").trim();
+    if (!k) return;
+    if (state.data.sops) delete state.data.sops[k];
+    if (state.data.sopLinks) delete state.data.sopLinks[k];
+    if (state.data.sopAutoOpenLinks) delete state.data.sopAutoOpenLinks[k];
+  }
+
+  function openSopKeyEditor({ key, mode }) {
+    ensureMaps();
+    const isNew = mode === "new";
+    const oldKey = String(key || "").trim();
+    const existingSteps = Array.isArray(state.data.sops?.[oldKey]) ? state.data.sops[oldKey] : [];
+    const existingLinks = getSopLinks(oldKey);
+    const existingAutoOpen = shouldAutoOpenSopLinks(oldKey);
+
+    const keyInput = h("input", { value: oldKey, placeholder: "例如：报销 / 发布公众号 / 剪辑视频" });
+    const autoOpenInput = h("input", { type: "checkbox", checked: existingAutoOpen ? "checked" : null });
+
+    const stepsTextarea = h("textarea", {
+      text: (existingSteps || []).join("\n"),
+      placeholder: "SOP：每行一个步骤；可用前缀：! 注意 / @检查点 / -> 提升点（可不写）",
+    });
+    const linksTextarea = h("textarea", {
+      text: (existingLinks || []).join("\n"),
+      placeholder: "共享链接：每行一个；同事项任务可复用；开始前可选择是否自动打开",
+    });
+
+    const body = h(
+      "div",
+      { class: "col" },
+      h("div", {}, h("label", { text: "事项（sopKey）" }), keyInput),
+      h(
+        "div",
+        { class: "check" },
+        autoOpenInput,
+        h(
+          "div",
+          {},
+          h("div", { class: "taskTitle", text: "默认自动打开共享链接" }),
+          h("div", { class: "muted" }, "开启后：同事项任务开始前会默认勾选“自动打开链接”")
+        )
+      ),
+      h("div", { class: "divider" }),
+      h("div", {}, h("label", { text: "SOP 步骤" }), stepsTextarea),
+      h("div", { class: "divider" }),
+      h("div", {}, h("label", { text: "共享链接（同事项复用）" }), linksTextarea),
+      h(
+        "div",
+        { class: "buttons" },
+        h(
+          "button",
+          {
+            class: "btn",
+            onclick: () => openLinksQuick(linksTextarea.value.split(/\r?\n/g), `链接面板：${keyInput.value.trim() || oldKey || "事项"}`),
+          },
+          "打开链接"
+        ),
+        h(
+          "button",
+          {
+            class: "btn",
+            onclick: () => copyToClipboard(normalizeLinks(linksTextarea.value.split(/\r?\n/g)).join("\n")),
+          },
+          "复制链接"
+        )
+      )
+    );
+
+    const footer = h(
+      "div",
+      { class: "buttons" },
+      h(
+        "button",
+        {
+          class: "btn btn--primary",
+          onclick: () => {
+            const nextKey = keyInput.value.trim();
+            if (!nextKey) {
+              toast("事项不能为空");
+              keyInput.focus();
+              return;
+            }
+
+            ensureMaps();
+            renameSopKeyEverywhere(oldKey, nextKey);
+
+            const nextSteps = stepsTextarea.value
+              .split(/\r?\n/g)
+              .map((s) => s.trim())
+              .filter(Boolean);
+            const nextLinks = normalizeLinks(linksTextarea.value.split(/\r?\n/g));
+            const nextAutoOpen = Boolean(autoOpenInput.checked);
+
+            // Allow empty SOP steps; item may exist only for shared links.
+            state.data.sops[nextKey] = nextSteps;
+
+            if (nextLinks.length) state.data.sopLinks[nextKey] = nextLinks;
+            else delete state.data.sopLinks[nextKey];
+
+            if (nextAutoOpen) state.data.sopAutoOpenLinks[nextKey] = true;
+            else delete state.data.sopAutoOpenLinks[nextKey];
+
+            persist();
+            ctrl.close();
+            toast(isNew ? "已创建事项" : "已保存事项");
+            render();
+          },
+        },
+        isNew ? "创建" : "保存"
+      ),
+      h("button", { class: "btn", onclick: () => ctrl.close() }, "取消")
+    );
+
+    const ctrl = openModal({ title: isNew ? "新建事项" : "管理事项", body, footer });
+    keyInput.focus();
+  }
+
+  const searchInput = h("input", { placeholder: "搜索事项（sopKey）..." });
+  const listEl = h("div", { class: "list" });
+
+  function rebuildList() {
+    const q = String(searchInput.value || "").trim().toLowerCase();
+    const keys = collectAllSopKeys().filter((k) => (q ? k.toLowerCase().includes(q) : true));
+
+    listEl.replaceChildren(
+      ...keys.map((k) => {
+        const steps = Array.isArray(state.data.sops?.[k]) ? state.data.sops[k] : [];
+        const links = getSopLinks(k);
+        const autoOpen = shouldAutoOpenSopLinks(k);
+
+        const meta = h(
+          "div",
+          { class: "meta" },
+          h("span", { class: "tag", text: `${steps.length} steps` }),
+          h("span", { class: "tag", text: `🔗 ${links.length}` }),
+          autoOpen ? h("span", { class: "tag", text: "默认自动打开" }) : null
+        );
+
+        const previewParts = [];
+        if (steps.length) previewParts.push((steps || []).slice(0, 2).join(" · ") + (steps.length > 2 ? " ..." : ""));
+        if (links.length) previewParts.push(`链接示例：${links[0]}`);
+
+        return h(
+          "div",
+          { class: "card" },
+          h("div", { class: "row" }, h("div", { class: "h1", text: k }), meta),
+          previewParts.length ? h("div", { class: "muted" }, previewParts.join(" / ")) : h("div", { class: "muted" }, "暂无 SOP 与共享链接"),
+          h("div", { class: "divider" }),
+          h(
+            "div",
+            { class: "buttons" },
+            h("button", { class: "btn btn--primary", onclick: () => openSopKeyEditor({ key: k, mode: "edit" }) }, "管理"),
+            links.length ? h("button", { class: "btn", onclick: () => openLinksQuick(links, `链接面板：${k}`) }, "打开链接") : null,
+            h(
+              "button",
+              {
+                class: "btn btn--danger",
+                onclick: () => {
+                  const ok = window.confirm(`确定删除该事项的资产（SOP / 共享链接 / 默认自动打开）？\n\n${k}`);
+                  if (!ok) return;
+                  deleteSopKeyAssets(k);
+                  persist();
+                  toast("已删除事项资产");
+                  rebuildList();
+                },
+              },
+              "删除"
+            )
+          )
+        );
+      })
+    );
+  }
+
+  searchInput.addEventListener("input", rebuildList);
+  rebuildList();
+
+  return h(
+    "div",
+    { class: "col" },
+    h(
+      "div",
+      { class: "card" },
+      h(
+        "div",
+        { class: "row" },
+        h("div", { class: "h1", text: "事项库（sopKey）" }),
+        h(
+          "div",
+          { class: "buttons" },
+          h("button", { class: "btn btn--primary", onclick: () => openSopKeyEditor({ key: "", mode: "new" }) }, "+ 新建事项"),
+          h("button", { class: "btn", onclick: () => setView("settings") }, "返回")
+        )
+      ),
+      h("div", { class: "divider" }),
+      h("div", {}, h("label", { text: "搜索" }), searchInput),
+      h("div", { class: "divider" }),
+      listEl,
+      h("div", { class: "divider" }),
+      h("div", { class: "muted" }, "说明：事项资产包含 SOP 步骤、共享链接、默认自动打开开关；同事项任务可复用共享链接。")
+    )
+  );
+}
+
 function formatMs(ms) {
   const clamped = Math.max(0, ms);
   const totalSec = Math.floor(clamped / 1000);
@@ -1186,6 +1678,7 @@ function renderFocus() {
     : "完成标准：做到你愿意提交 / 发布 / 交付。";
 
   const sopKey = (sess.sopKey || getSopKey(task) || task.title).trim();
+  const links = getEffectiveLinks(task, sopKey);
   const sopSteps = sess.useSop ? state.data.sops[sopKey] || [] : [];
   const checklist = h("div", { class: "checklist" });
   if (sopSteps.length) {
@@ -1360,23 +1853,17 @@ function renderFocus() {
         ? h("div", { class: "muted" }, `🎯 本次练习重点：${(sess.practiceFocus || "").trim()}`)
         : null,
       h("div", { class: "muted" }, dod),
-      getLinks(task).length
+      links.length
         ? h(
             "div",
             { class: "meta" },
-            h("span", { class: "tag", text: `🔗 ${getLinks(task).length} links` }),
-            h(
+            h("span", { class: "tag", text: `🔗 ${links.length} links` }),
+              h(
               "button",
               {
                 class: "btn",
                 onclick: () => {
-                  const links = getLinks(task);
-                  if (links.length === 1) {
-                    window.open(links[0], "_blank", "noopener,noreferrer");
-                  } else if (links.length > 1) {
-                    openLinkHub(links, `链接面板：${task.title}`) || toast("弹窗被拦截：已在页面内提供链接列表");
-                    openLinksUI(links, "打开链接（列表）");
-                  }
+                  openUrlsStable(links, `Links: ${task.title}`);
                 },
               },
               "打开链接"

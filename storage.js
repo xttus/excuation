@@ -10,6 +10,10 @@ function defaultData() {
     tasks: [],
     // Map: sopKey -> steps[]
     sops: {},
+    // Map: sopKey -> links[]
+    sopLinks: {},
+    // Map: sopKey -> boolean (true means: always auto-open links on start)
+    sopAutoOpenLinks: {},
     // Practice sessions history (append-only; keep last N in UI/service layer).
     sessions: [],
     stats: {
@@ -60,6 +64,24 @@ function sanitizeLoadedData(raw) {
       if (!Array.isArray(v)) continue;
       const steps = v.filter((s) => typeof s === "string").map((s) => s.trim()).filter(Boolean);
       out.sops[k] = steps;
+    }
+  }
+
+  out.sopLinks = {};
+  if (raw?.sopLinks && typeof raw.sopLinks === "object" && !Array.isArray(raw.sopLinks)) {
+    for (const [k, v] of Object.entries(raw.sopLinks)) {
+      if (!k || typeof k !== "string") continue;
+      if (!Array.isArray(v)) continue;
+      const links = v.filter((s) => typeof s === "string").map((s) => s.trim()).filter(Boolean);
+      out.sopLinks[k] = links;
+    }
+  }
+
+  out.sopAutoOpenLinks = {};
+  if (raw?.sopAutoOpenLinks && typeof raw.sopAutoOpenLinks === "object" && !Array.isArray(raw.sopAutoOpenLinks)) {
+    for (const [k, v] of Object.entries(raw.sopAutoOpenLinks)) {
+      if (!k || typeof k !== "string") continue;
+      out.sopAutoOpenLinks[k] = Boolean(v);
     }
   }
 

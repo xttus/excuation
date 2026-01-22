@@ -1,5 +1,6 @@
 /* Minimal offline cache for static assets (served over http/https). */
-const CACHE_NAME = "execpanel-mvp-v1";
+// Bump this to invalidate old caches when shipping changes.
+const CACHE_NAME = "execpanel-mvp-v6";
 const ASSETS = ["./", "./index.html", "./styles.css", "./app.js", "./storage.js", "./manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
@@ -25,20 +26,35 @@ self.addEventListener("fetch", (event) => {
   if (request.method !== "GET") return;
 
   event.respondWith(
-    caches.match(request).then((cached) => {
-      if (cached) return cached;
-      return fetch(request)
-        .then((resp) => {
-          // Cache same-origin requests for basic offline resilience.
-          const url = new URL(request.url);
-          if (url.origin === self.location.origin) {
-            const copy = resp.clone();
-            caches.open(CACHE_NAME).then((c) => c.put(request, copy)).catch(() => {});
-          }
+    (async () => {
+      const url = new URL(request.url);
+      const sameOrigin = url.origin === self.location.origin;
+
+      // For core assets, prefer network-first so updates are visible without manual cache clearing.
+      if (sameOrigin && ASSETS.some((p) => url.pathname.endsWith(p.replace("./", "/")) || (p === "./" && url.pathname === "/"))) {
+        try {
+          const resp = await fetch(new Request(request, { cache: "reload" }));
+          const copy = resp.clone();
+          caches.open(CACHE_NAME).then((c) => c.put(request, copy)).catch(() => {});
           return resp;
-        })
-        .catch(() => cached);
-    })
+        } catch {
+          return (await caches.match(request)) || Response.error();
+        }
+      }
+
+      const cached = await caches.match(request);
+      if (cached) return cached;
+
+      try {
+        const resp = await fetch(request);
+        if (sameOrigin) {
+          const copy = resp.clone();
+          caches.open(CACHE_NAME).then((c) => c.put(request, copy)).catch(() => {});
+        }
+        return resp;
+      } catch {
+        return cached || Response.error();
+      }
+    })()
   );
 });
-
