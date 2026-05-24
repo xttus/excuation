@@ -7,7 +7,7 @@ const modalRoot = document.getElementById("modalRoot");
 
 const state = {
   data: loadData(),
-  view: "home", // home | tasks | focus | settings | sops
+  view: "home", // home | tasks | focus | settings | sops | history
   session: null, // { taskId, startedAt, endsAt, openLinks, useSop, definitionOfDone, estimateMin, sopKey, practiceFocus }
 };
 
@@ -26,6 +26,9 @@ const SELF_COMPARE_OPTIONS = [
   { code: "same", label: "差不多" },
   { code: "worse", label: "更差" },
 ];
+
+const FAIL_REASON_LABELS = Object.fromEntries(FAIL_REASONS.map((r) => [r.code, r.label]));
+const SELF_COMPARE_LABELS = Object.fromEntries(SELF_COMPARE_OPTIONS.map((o) => [o.code, o.label]));
 
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -271,6 +274,48 @@ function deleteTask(taskId) {
   persist();
 }
 
+function cloneTaskForNextPractice(sourceTask) {
+  if (!sourceTask) return null;
+  const next = {
+    ...sourceTask,
+    id: newId("t"),
+    status: "todo",
+    order: maxOrder() + 1,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    lastSkippedAt: "",
+    notes: [],
+    noteDraft: "",
+  };
+  upsertTask(next);
+  toast("已创建下一次练习");
+  return next;
+}
+
+function findTaskById(taskId) {
+  return (state.data.tasks || []).find((t) => t.id === taskId) || null;
+}
+
+function getSessionTaskTitle(session) {
+  return findTaskById(session?.taskId)?.title || "已删除任务";
+}
+
+function formatSessionDate(value) {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString();
+}
+
+function formatDurationSec(sec) {
+  const n = Math.max(0, Number.parseInt(String(sec || 0), 10));
+  const m = Math.floor(n / 60);
+  const s = n % 60;
+  if (m <= 0) return `${s} 秒`;
+  if (s === 0) return `${m} 分钟`;
+  return `${m} 分 ${s} 秒`;
+}
+
 function openModal({ title, body, footer, onClose, dismissible = true }) {
   modalRoot.setAttribute("aria-hidden", "false");
   modalRoot.replaceChildren(
@@ -382,9 +427,10 @@ function openFailReasonModal({ title, onSubmit }) {
   });
 }
 
-function openSuccessSettleModal({ sessionId, sopKey, taskTitle }) {
+function openSuccessSettleModal({ sessionId, sopKey, taskTitle, sourceTask }) {
   let selectedCompare = "";
   let compareApplied = false;
+  const canCreateNext = sourceTask?.type === "repeat" || sourceTask?.type === "light";
 
   const compareBlock = h(
     "div",
@@ -440,6 +486,26 @@ function openSuccessSettleModal({ sessionId, sopKey, taskTitle }) {
     updatePracticeSession(sessionId, { selfCompare: selectedCompare });
   }
 
+  function saveSop({ createNext = false } = {}) {
+    const key = keyInput.value.trim();
+    if (!key) {
+      toast("事项不能为空");
+      keyInput.focus();
+      return false;
+    }
+    const steps = textarea.value
+      .split(/\r?\n/g)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    state.data.sops[key] = steps;
+    persist();
+    applyCompareIfAny();
+    if (createNext) cloneTaskForNextPractice(sourceTask);
+    ctrl.close();
+    toast(steps.length ? "SOP 已保存" : "SOP 已清空");
+    return true;
+  }
+
   const footer = h(
     "div",
     { class: "buttons" },
@@ -448,25 +514,37 @@ function openSuccessSettleModal({ sessionId, sopKey, taskTitle }) {
       {
         class: "btn btn--primary",
         onclick: () => {
-          const key = keyInput.value.trim();
-          if (!key) {
-            toast("事项不能为空");
-            keyInput.focus();
-            return;
-          }
-          const steps = textarea.value
-            .split(/\r?\n/g)
-            .map((s) => s.trim())
-            .filter(Boolean);
-          state.data.sops[key] = steps;
-          persist();
-          applyCompareIfAny();
-          ctrl.close();
-          toast(steps.length ? "SOP 已保存" : "SOP 已清空");
+          saveSop();
         },
       },
       "保存 SOP 并结束"
     ),
+    canCreateNext
+      ? h(
+          "button",
+          {
+            class: "btn btn--primary",
+            onclick: () => {
+              saveSop({ createNext: true });
+            },
+          },
+          "保存 SOP，再练一次"
+        )
+      : null,
+    canCreateNext
+      ? h(
+          "button",
+          {
+            class: "btn",
+            onclick: () => {
+              applyCompareIfAny();
+              cloneTaskForNextPractice(sourceTask);
+              ctrl.close();
+            },
+          },
+          "不保存 SOP，再练一次"
+        )
+      : null,
     h(
       "button",
       {
@@ -933,6 +1011,21 @@ function openStartConfirm(task) {
   const ctrl = openModal({ title: "开始前确认", body, footer });
 }
 
+function quickStartTask(task) {
+  if (!task) return;
+  const sopKey = getSopKey(task);
+  const steps = Array.isArray(state.data.sops[sopKey]) ? state.data.sops[sopKey] : [];
+  startSession(task.id, {
+    estimateMin: Math.max(1, Number.parseInt(String(task.estimateMin || state.data.settings.defaultEstimateMin || 25), 10)),
+    definitionOfDone: task.definitionOfDone || "",
+    sopKey,
+    practiceFocus: task.lastPracticeFocus || "",
+    openLinks: false,
+    rememberAutoOpenLinks: shouldAutoOpenSopLinks(sopKey),
+    useSop: steps.length > 0,
+  });
+}
+
 function startSession(taskId, opts) {
   const task = state.data.tasks.find((t) => t.id === taskId);
   if (!task || task.status !== "todo") return;
@@ -1072,39 +1165,46 @@ function stopFocusTicker() {
 function renderHome() {
   const rec = getRecommendedTask();
 
-  const quickAddBtn = h("button", { class: "btn btn--primary", onclick: () => openTaskEditor({ mode: "new" }) }, "+ 快速添加任务");
+  const quickAddBtn = h("button", { class: "btn", onclick: () => openTaskEditor({ mode: "new" }) }, "+ 添加任务");
   const toPoolBtn = h("button", { class: "btn", onclick: () => setView("tasks") }, "任务池");
+  const toHistoryBtn = h("button", { class: "btn", onclick: () => setView("history") }, "练习记录");
   const toSettingsBtn = h("button", { class: "btn", onclick: () => setView("settings") }, "设置");
 
-  const actions = h("div", { class: "buttons" }, quickAddBtn, toPoolBtn, toSettingsBtn);
+  const actions = h("div", { class: "homeNav" }, quickAddBtn, toPoolBtn, toHistoryBtn, toSettingsBtn);
 
   if (!rec) {
     return h(
       "div",
-      { class: "col" },
+      { class: "homeShell" },
       h(
-        "div",
-        { class: "card" },
-        h("div", { class: "h1", text: "任务池为空" }),
-        h("div", { class: "muted" }, "先加一个“最小可开始”的任务。"),
-        h("div", { class: "divider" }),
-        actions
-      )
+        "section",
+        { class: "emptyState" },
+        h("div", { class: "eyebrow", text: "Execution Panel" }),
+        h("div", { class: "displayTitle", text: "先放进一个可以马上开始的练习" }),
+        h("div", { class: "lead", text: "不需要计划完整项目，只写下一步动作就够了。" }),
+        h("div", { class: "primaryRow" }, h("button", { class: "btn btn--primary btn--xl", onclick: () => openTaskEditor({ mode: "new" }) }, "+ 添加第一个任务"))
+      ),
+      actions
     );
   }
 
+  const sopKey = getSopKey(rec);
+  const effectiveLinks = getEffectiveLinks(rec, sopKey);
+  const sopSteps = Array.isArray(state.data.sops[sopKey]) ? state.data.sops[sopKey] : [];
   const meta = h(
     "div",
     { class: "meta" },
     rec.importance === "urgent" ? h("span", { class: "tag tag--urgent", text: "🔴 urgent" }) : null,
-    h("span", { class: "tag tag--type", text: `type: ${rec.type}` }),
+    h("span", { class: "tag tag--type", text: rec.type }),
     h("span", { class: "tag", text: `${rec.estimateMin} min` }),
-    getLinks(rec).length ? h("span", { class: "tag", text: `🔗 ${getLinks(rec).length}` }) : null,
-    getSopKey(rec) ? h("span", { class: "tag", text: `事项：${getSopKey(rec)}` }) : null,
+    effectiveLinks.length ? h("span", { class: "tag", text: `链接 ${effectiveLinks.length}` }) : null,
+    sopSteps.length ? h("span", { class: "tag", text: `SOP ${sopSteps.length}` }) : null,
+    sopKey ? h("span", { class: "tag", text: sopKey }) : null,
     (rec.notes?.length || 0) > 0 ? h("span", { class: "tag", text: `📝 ${rec.notes.length}` }) : null
   );
 
-  const startBtn = h("button", { class: "btn btn--primary", onclick: () => openStartConfirm(rec) }, "开始");
+  const startBtn = h("button", { class: "btn btn--primary btn--xl", onclick: () => quickStartTask(rec) }, "立即开始");
+  const prepBtn = h("button", { class: "btn btn--xl", onclick: () => openStartConfirm(rec) }, "准备 / 链接 / SOP");
   const skipBtn = h(
     "button",
     {
@@ -1116,21 +1216,23 @@ function renderHome() {
         render();
       },
     },
-    "跳过"
+    "换一个"
   );
 
   return h(
     "div",
-    { class: "col" },
+    { class: "homeShell" },
     h(
-      "div",
-      { class: "card" },
-      h("div", { class: "muted" }, "当前推荐任务（仅 1 个）"),
-      h("div", { class: "row" }, h("div", { class: "col" }, h("div", { class: "h1", text: rec.title }), meta), h("div", { class: "buttons" }, startBtn, skipBtn)),
-      rec.definitionOfDone ? h("div", { class: "divider" }) : null,
-      rec.definitionOfDone ? h("div", { class: "muted" }, `完成标准：${rec.definitionOfDone}`) : null
+      "section",
+      { class: "practiceHero" },
+      h("div", { class: "eyebrow", text: "现在只做这一件事" }),
+      h("div", { class: "displayTitle", text: rec.title }),
+      meta,
+      rec.lastPracticeFocus ? h("div", { class: "focusLine" }, h("span", { text: "练习重点" }), h("strong", { text: rec.lastPracticeFocus })) : null,
+      rec.definitionOfDone ? h("div", { class: "doneLine" }, h("span", { text: "完成标准" }), h("strong", { text: rec.definitionOfDone })) : null,
+      h("div", { class: "primaryRow" }, startBtn, prepBtn, skipBtn)
     ),
-    h("div", { class: "card" }, actions)
+    actions
   );
 }
 
@@ -1211,6 +1313,115 @@ function renderTaskPool() {
   );
 }
 
+function renderPracticeHistory() {
+  const sessions = [...(state.data.sessions || [])].sort((a, b) => String(b.endedAt || "").localeCompare(String(a.endedAt || "")));
+  const summaryByKey = new Map();
+
+  for (const s of sessions) {
+    const key = String(s.sopKey || "未归类").trim() || "未归类";
+    const cur = summaryByKey.get(key) || {
+      key,
+      total: 0,
+      success: 0,
+      fail: 0,
+      lastPracticeFocus: "",
+      lastEndedAt: "",
+      failReasons: {},
+      compare: { better: 0, same: 0, worse: 0 },
+    };
+    cur.total += 1;
+    if (s.result === "success") cur.success += 1;
+    if (s.result === "fail") {
+      cur.fail += 1;
+      if (s.failReason) cur.failReasons[s.failReason] = (cur.failReasons[s.failReason] || 0) + 1;
+    }
+    if (s.selfCompare && cur.compare[s.selfCompare] !== undefined) cur.compare[s.selfCompare] += 1;
+    if (!cur.lastEndedAt || String(s.endedAt || "").localeCompare(cur.lastEndedAt) > 0) {
+      cur.lastEndedAt = s.endedAt || "";
+      cur.lastPracticeFocus = s.practiceFocus || "";
+    }
+    summaryByKey.set(key, cur);
+  }
+
+  const summaryCards = Array.from(summaryByKey.values())
+    .sort((a, b) => String(b.lastEndedAt || "").localeCompare(String(a.lastEndedAt || "")))
+    .map((item) => {
+      const topFail = Object.entries(item.failReasons).sort((a, b) => b[1] - a[1])[0];
+      const compareText = [
+        item.compare.better ? `更好 ${item.compare.better}` : "",
+        item.compare.same ? `持平 ${item.compare.same}` : "",
+        item.compare.worse ? `更差 ${item.compare.worse}` : "",
+      ]
+        .filter(Boolean)
+        .join(" / ");
+
+      return h(
+        "div",
+        { class: "card" },
+        h("div", { class: "row" }, h("div", { class: "h1", text: item.key }), h("div", { class: "meta" }, h("span", { class: "tag", text: `${item.total} 次` }), h("span", { class: "tag", text: `成功 ${item.success}` }), h("span", { class: "tag", text: `失败 ${item.fail}` }))),
+        item.lastPracticeFocus ? h("div", { class: "muted" }, `最近练习重点：${item.lastPracticeFocus}`) : null,
+        topFail ? h("div", { class: "muted" }, `主要失败原因：${FAIL_REASON_LABELS[topFail[0]] || topFail[0]}（${topFail[1]} 次）`) : null,
+        compareText ? h("div", { class: "muted" }, `自我对比：${compareText}`) : null,
+        item.lastEndedAt ? h("div", { class: "muted" }, `最近一次：${formatSessionDate(item.lastEndedAt)}`) : null
+      );
+    });
+
+  const recentCards = sessions.slice(0, 50).map((s) => {
+    const resultText = s.result === "success" ? "完成" : "失败";
+    const detail =
+      s.result === "fail"
+        ? `原因：${FAIL_REASON_LABELS[s.failReason] || s.failReason || "未记录"}`
+        : s.selfCompare
+          ? `对比：${SELF_COMPARE_LABELS[s.selfCompare] || s.selfCompare}`
+          : "未做对比";
+
+    return h(
+      "div",
+      { class: "card" },
+      h(
+        "div",
+        { class: "row" },
+        h("div", { class: "col" }, h("div", { class: "taskTitle", text: getSessionTaskTitle(s) }), h("div", { class: "muted" }, formatSessionDate(s.endedAt))),
+        h("div", { class: "meta" }, h("span", { class: "tag", text: resultText }), h("span", { class: "tag", text: formatDurationSec(s.actualSec) }))
+      ),
+      h("div", { class: "meta" }, s.sopKey ? h("span", { class: "tag", text: `事项：${s.sopKey}` }) : null, h("span", { class: "tag", text: `计划 ${s.plannedMin || 0} 分钟` }), s.failTrigger ? h("span", { class: "tag", text: s.failTrigger === "timeout" ? "超时" : "放弃" }) : null),
+      s.practiceFocus ? h("div", { class: "muted" }, `练习重点：${s.practiceFocus}`) : null,
+      h("div", { class: "muted" }, detail)
+    );
+  });
+
+  return h(
+    "div",
+    { class: "col" },
+    h(
+      "div",
+      { class: "card" },
+      h(
+        "div",
+        { class: "row" },
+        h("div", { class: "h1", text: "练习记录" }),
+        h("div", { class: "buttons" }, h("button", { class: "btn", onclick: () => setView("home") }, "返回"))
+      ),
+      h("div", { class: "divider" }),
+      h("div", { class: "muted" }, "这里展示最近的练习尝试，以及按事项汇总的成功、失败和复盘线索。")
+    ),
+    h(
+      "div",
+      { class: "card" },
+      h("div", { class: "h1", text: "事项复盘" }),
+      h("div", { class: "divider" }),
+      summaryCards.length ? h("div", { class: "list" }, summaryCards) : h("div", { class: "muted" }, "还没有练习记录。完成或失败一次任务后，这里会出现复盘线索。")
+    ),
+    h(
+      "div",
+      { class: "card" },
+      h("div", { class: "h1", text: "最近 50 次" }),
+      h("div", { class: "divider" }),
+      recentCards.length ? h("div", { class: "list" }, recentCards) : h("div", { class: "muted" }, "暂无记录。")
+    )
+  );
+}
+
 function renderSettings() {
   const s = state.data.settings;
   const defaultEstimateMin = h("input", { type: "number", min: "1", value: String(s.defaultEstimateMin) });
@@ -1266,6 +1477,7 @@ function renderSettings() {
           "div",
           { class: "buttons" },
           h("button", { class: "btn", onclick: () => setView("sops") }, "SOP 库"),
+          h("button", { class: "btn", onclick: () => setView("history") }, "练习记录"),
           h("button", { class: "btn", onclick: () => setView("home") }, "返回")
         )
       ),
@@ -1781,7 +1993,7 @@ function renderFocus() {
         settleSuccess(task.id);
         state.session = null;
         setView("home");
-        openSuccessSettleModal({ sessionId: srec.id, sopKey, taskTitle: task.title });
+        openSuccessSettleModal({ sessionId: srec.id, sopKey, taskTitle: task.title, sourceTask: { ...task } });
       },
     },
     "完成"
@@ -1935,6 +2147,7 @@ function render() {
   else if (state.view === "tasks") viewEl = renderTaskPool();
   else if (state.view === "settings") viewEl = renderSettings();
   else if (state.view === "sops") viewEl = renderSops();
+  else if (state.view === "history") viewEl = renderPracticeHistory();
   else if (state.view === "focus") viewEl = renderFocus();
 
   appEl.replaceChildren(viewEl);
