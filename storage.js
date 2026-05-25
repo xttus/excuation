@@ -1,5 +1,5 @@
-const STORAGE_KEY = "execPanel:v3";
-const LEGACY_STORAGE_KEY = "execPanel:v1";
+const STORAGE_KEY = "execPanel:v4";
+const LEGACY_KEYS = ["execPanel:v3", "execPanel:v1"];
 const REMOTE_ENDPOINT = "./api/data";
 
 function nowIso() {
@@ -11,30 +11,110 @@ function coerceInt(v, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function normalizeLines(value) {
-  if (Array.isArray(value)) {
-    return value.filter((s) => typeof s === "string").map((s) => s.trim()).filter(Boolean);
-  }
-  if (typeof value !== "string") return [];
-  return value.split(/\r?\n/g).map((s) => s.trim()).filter(Boolean);
+function stringValue(v) {
+  return String(v || "").trim();
 }
 
-function normalizeLinks(value) {
+function linesFrom(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string") return [];
+  return value.split(/\r?\n/g);
+}
+
+function uniqueBy(arr, getKey) {
   const seen = new Set();
   const out = [];
-  for (const s of normalizeLines(value)) {
-    if (seen.has(s)) continue;
-    seen.add(s);
-    out.push(s);
+  for (const item of arr) {
+    const key = getKey(item);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
   }
   return out;
 }
 
+function inferStepType(text) {
+  const s = stringValue(text);
+  if (s.startsWith("@")) return "check";
+  if (s.startsWith("!")) return "warning";
+  if (s.startsWith("->") || s.startsWith("↑")) return "improvement";
+  return "action";
+}
+
+function normalizeSteps(value) {
+  const raw = linesFrom(value);
+  const steps = raw
+    .map((step, index) => {
+      if (typeof step === "string") {
+        const text = stringValue(step);
+        if (!text) return null;
+        return {
+          id: newId("step"),
+          text,
+          type: inferStepType(text),
+          order: index,
+          createdAt: nowIso(),
+          archivedAt: "",
+        };
+      }
+      const text = stringValue(step?.text);
+      if (!text) return null;
+      return {
+        id: stringValue(step?.id) || newId("step"),
+        text,
+        type: ["action", "check", "warning", "improvement"].includes(step?.type) ? step.type : inferStepType(text),
+        order: coerceInt(step?.order, index),
+        createdAt: typeof step?.createdAt === "string" ? step.createdAt : nowIso(),
+        archivedAt: typeof step?.archivedAt === "string" ? step.archivedAt : "",
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.order - b.order)
+    .map((step, index) => ({ ...step, order: index }));
+  return uniqueBy(steps, (s) => s.id);
+}
+
+function normalizeLinks(value) {
+  const raw = linesFrom(value);
+  const links = raw
+    .map((link, index) => {
+      if (typeof link === "string") {
+        const url = stringValue(link);
+        if (!url) return null;
+        return {
+          id: newId("link"),
+          url,
+          title: "",
+          order: index,
+          createdAt: nowIso(),
+          lastUsedAt: "",
+          archivedAt: "",
+        };
+      }
+      const url = stringValue(link?.url || link?.href);
+      if (!url) return null;
+      return {
+        id: stringValue(link?.id) || newId("link"),
+        url,
+        title: stringValue(link?.title),
+        order: coerceInt(link?.order, index),
+        createdAt: typeof link?.createdAt === "string" ? link.createdAt : nowIso(),
+        lastUsedAt: typeof link?.lastUsedAt === "string" ? link.lastUsedAt : "",
+        archivedAt: typeof link?.archivedAt === "string" ? link.archivedAt : "",
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.order - b.order)
+    .map((link, index) => ({ ...link, order: index }));
+  return uniqueBy(links, (l) => l.url);
+}
+
 function defaultData() {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     items: [],
-    sessions: [],
+    practices: [],
+    inbox: [],
     stats: {
       points: 0,
       streak: 0,
@@ -50,93 +130,119 @@ function defaultData() {
 }
 
 function normalizeItem(raw) {
-  const name = String(raw?.name || raw?.title || raw?.sopKey || "").trim();
-  const id = String(raw?.id || "").trim() || newId("i");
+  const name = stringValue(raw?.name || raw?.title || raw?.sopKey);
   return {
-    id,
+    id: stringValue(raw?.id) || newId("item"),
     name,
-    goal: String(raw?.goal || "").trim(),
-    steps: normalizeLines(raw?.steps),
+    goal: stringValue(raw?.goal),
+    nextPracticeFocus: stringValue(raw?.nextPracticeFocus || raw?.lastPracticeFocus),
+    steps: normalizeSteps(raw?.steps),
     links: normalizeLinks(raw?.links),
     defaultEstimateMin: coerceInt(raw?.defaultEstimateMin ?? raw?.estimateMin, 25),
-    lastPracticeFocus: String(raw?.lastPracticeFocus || "").trim(),
+    createdAt: typeof raw?.createdAt === "string" ? raw.createdAt : nowIso(),
+    updatedAt: typeof raw?.updatedAt === "string" ? raw.updatedAt : nowIso(),
+    archivedAt: typeof raw?.archivedAt === "string" ? raw.archivedAt : "",
+  };
+}
+
+function normalizePractice(raw) {
+  const result = raw?.result === "fail" ? "fail" : raw?.result === "success" ? "success" : "";
+  const stepsTotal = coerceInt(raw?.stepsTotal, Array.isArray(raw?.checkedStepIds) ? raw.checkedStepIds.length : 0);
+  const checkedStepIds = Array.isArray(raw?.checkedStepIds) ? raw.checkedStepIds.map(stringValue).filter(Boolean) : [];
+  const openedLinkIds = Array.isArray(raw?.openedLinkIds) ? raw.openedLinkIds.map(stringValue).filter(Boolean) : [];
+  const addedLinkIds = Array.isArray(raw?.addedLinkIds) ? raw.addedLinkIds.map(stringValue).filter(Boolean) : [];
+
+  return {
+    id: stringValue(raw?.id) || newId("practice"),
+    itemId: stringValue(raw?.itemId),
+    itemNameSnapshot: stringValue(raw?.itemNameSnapshot || raw?.itemName || raw?.sopKey),
+    taskTitle: stringValue(raw?.taskTitle),
+    goalSnapshot: stringValue(raw?.goalSnapshot),
+    focus: stringValue(raw?.focus || raw?.practiceFocus),
+    plannedMin: coerceInt(raw?.plannedMin, 0),
+    actualSec: coerceInt(raw?.actualSec, 0),
+    result,
+    startedAt: typeof raw?.startedAt === "string" ? raw.startedAt : "",
+    endedAt: typeof raw?.endedAt === "string" ? raw.endedAt : "",
+    progressRating: ["closer", "same", "off"].includes(raw?.progressRating || raw?.goalProgress)
+      ? raw.progressRating || raw.goalProgress
+      : "",
+    failReason: stringValue(raw?.failReason),
+    failTrigger: stringValue(raw?.failTrigger),
+    note: stringValue(raw?.note),
+    reminder: stringValue(raw?.reminder),
+    addedReminderToSteps: Boolean(raw?.addedReminderToSteps),
+    stepsTotal,
+    stepsChecked: coerceInt(raw?.stepsChecked, checkedStepIds.length),
+    checkedStepIds,
+    linksTotal: coerceInt(raw?.linksTotal, openedLinkIds.length),
+    linksOpenedCount: coerceInt(raw?.linksOpenedCount, openedLinkIds.length),
+    linksAddedCount: coerceInt(raw?.linksAddedCount, addedLinkIds.length),
+    openedLinkIds,
+    addedLinkIds,
+    createdAt: typeof raw?.createdAt === "string" ? raw.createdAt : typeof raw?.endedAt === "string" ? raw.endedAt : nowIso(),
+    updatedAt: typeof raw?.updatedAt === "string" ? raw.updatedAt : typeof raw?.endedAt === "string" ? raw.endedAt : nowIso(),
+  };
+}
+
+function normalizeInboxTask(raw) {
+  return {
+    id: stringValue(raw?.id) || newId("inbox"),
+    title: stringValue(raw?.title),
+    note: stringValue(raw?.note),
+    status: raw?.status === "done" ? "done" : "todo",
+    promotedToItemId: stringValue(raw?.promotedToItemId),
     createdAt: typeof raw?.createdAt === "string" ? raw.createdAt : nowIso(),
     updatedAt: typeof raw?.updatedAt === "string" ? raw.updatedAt : nowIso(),
   };
 }
 
-function normalizeSession(raw) {
-  const result = raw?.result === "fail" ? "fail" : raw?.result === "success" ? "success" : "";
-  return {
-    id: String(raw?.id || "").trim() || newId("s"),
-    itemId: String(raw?.itemId || "").trim(),
-    itemName: String(raw?.itemName || raw?.sopKey || "").trim(),
-    taskTitle: String(raw?.taskTitle || "").trim(),
-    goalSnapshot: String(raw?.goalSnapshot || "").trim(),
-    practiceFocus: String(raw?.practiceFocus || "").trim(),
-    startedAt: typeof raw?.startedAt === "string" ? raw.startedAt : "",
-    endedAt: typeof raw?.endedAt === "string" ? raw.endedAt : "",
-    plannedMin: coerceInt(raw?.plannedMin, 0),
-    actualSec: coerceInt(raw?.actualSec, 0),
-    result,
-    goalProgress: raw?.goalProgress === "closer" || raw?.goalProgress === "same" || raw?.goalProgress === "off" ? raw.goalProgress : "",
-    failReason: String(raw?.failReason || "").trim(),
-    failTrigger: String(raw?.failTrigger || "").trim(),
-    reminder: String(raw?.reminder || "").trim(),
-  };
-}
-
-function migrateLegacy(raw) {
-  const base = defaultData();
-  if (!raw || typeof raw !== "object") return base;
-
+function migrateLegacyToV4(raw) {
   const itemByName = new Map();
   const ensureItem = (name) => {
-    const key = String(name || "").trim();
-    if (!key) return null;
+    const key = stringValue(name || "未归类");
     if (itemByName.has(key)) return itemByName.get(key);
     const item = normalizeItem({
-      id: newId("i"),
+      id: newId("item"),
       name: key,
-      goal: "",
-      steps: Array.isArray(raw.sops?.[key]) ? raw.sops[key] : [],
-      links: Array.isArray(raw.sopLinks?.[key]) ? raw.sopLinks[key] : [],
+      steps: raw?.sops?.[key] || [],
+      links: raw?.sopLinks?.[key] || [],
       createdAt: nowIso(),
-      updatedAt: raw.updatedAt || nowIso(),
+      updatedAt: raw?.updatedAt || nowIso(),
     });
     itemByName.set(key, item);
     return item;
   };
 
-  for (const t of Array.isArray(raw.tasks) ? raw.tasks : []) {
-    const name = String(t?.sopKey || t?.title || "").trim();
-    const item = ensureItem(name);
-    if (!item) continue;
-    if (!item.lastPracticeFocus && typeof t?.lastPracticeFocus === "string") item.lastPracticeFocus = t.lastPracticeFocus.trim();
+  for (const t of Array.isArray(raw?.tasks) ? raw.tasks : []) {
+    const item = ensureItem(t?.sopKey || t?.title);
+    if (!item.nextPracticeFocus) item.nextPracticeFocus = stringValue(t?.lastPracticeFocus);
     item.defaultEstimateMin = coerceInt(t?.estimateMin, item.defaultEstimateMin);
     item.links = normalizeLinks([...(item.links || []), ...(Array.isArray(t?.links) ? t.links : [])]);
   }
+  for (const key of Object.keys(raw?.sops || {})) ensureItem(key);
+  for (const key of Object.keys(raw?.sopLinks || {})) ensureItem(key);
 
-  for (const key of Object.keys(raw.sops || {})) ensureItem(key);
-  for (const key of Object.keys(raw.sopLinks || {})) ensureItem(key);
-
-  const sessions = (Array.isArray(raw.sessions) ? raw.sessions : [])
-    .map((s) => {
-      const item = ensureItem(s?.sopKey || "未归类");
-      return normalizeSession({
-        ...s,
-        itemId: item?.id || "",
-        itemName: item?.name || s?.sopKey || "未归类",
-        taskTitle: String((raw.tasks || []).find((t) => t?.id === s?.taskId)?.title || s?.sopKey || "练习").trim(),
-        goalProgress: s?.selfCompare === "better" ? "closer" : s?.selfCompare === "worse" ? "off" : s?.selfCompare === "same" ? "same" : "",
-      });
-    })
-    .filter((s) => s.result);
+  const practices = (Array.isArray(raw?.sessions) ? raw.sessions : []).map((s) => {
+    const item = ensureItem(s?.sopKey || "未归类");
+    const task = (raw?.tasks || []).find((t) => t?.id === s?.taskId);
+    return normalizePractice({
+      ...s,
+      itemId: item.id,
+      itemNameSnapshot: item.name,
+      taskTitle: task?.title || s?.sopKey || "练习",
+      focus: s?.practiceFocus,
+      progressRating: s?.selfCompare === "better" ? "closer" : s?.selfCompare === "worse" ? "off" : s?.selfCompare === "same" ? "same" : "",
+      stepsTotal: item.steps.length,
+      linksTotal: item.links.length,
+    });
+  });
 
   return {
-    ...base,
+    ...defaultData(),
     items: Array.from(itemByName.values()).filter((i) => i.name),
-    sessions,
+    practices: practices.filter((p) => p.result),
+    inbox: [],
     stats: {
       points: coerceInt(raw?.stats?.points, 0),
       streak: coerceInt(raw?.stats?.streak, 0),
@@ -153,16 +259,19 @@ function migrateLegacy(raw) {
 
 export function sanitizeData(raw) {
   if (!raw || typeof raw !== "object") return defaultData();
-  if (raw.schemaVersion !== 3 && (Array.isArray(raw.tasks) || raw.sops)) return migrateLegacy(raw);
+  if (Array.isArray(raw.tasks) || raw.sops) return migrateLegacyToV4(raw);
 
   const base = defaultData();
   const items = (Array.isArray(raw.items) ? raw.items : []).map(normalizeItem).filter((i) => i.name);
-  const sessions = (Array.isArray(raw.sessions) ? raw.sessions : []).map(normalizeSession).filter((s) => s.result);
+  const practicesSource = Array.isArray(raw.practices) ? raw.practices : Array.isArray(raw.sessions) ? raw.sessions : [];
+  const practices = practicesSource.map(normalizePractice).filter((p) => p.result);
+  const inbox = (Array.isArray(raw.inbox) ? raw.inbox : []).map(normalizeInboxTask).filter((t) => t.title);
 
   return {
     ...base,
     items,
-    sessions,
+    practices,
+    inbox,
     stats: {
       points: coerceInt(raw?.stats?.points, 0),
       streak: coerceInt(raw?.stats?.streak, 0),
@@ -182,8 +291,10 @@ export function loadData() {
     const current = localStorage.getItem(STORAGE_KEY);
     if (current) return sanitizeData(JSON.parse(current));
 
-    const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
-    if (legacy) return sanitizeData(JSON.parse(legacy));
+    for (const key of LEGACY_KEYS) {
+      const legacy = localStorage.getItem(key);
+      if (legacy) return sanitizeData(JSON.parse(legacy));
+    }
     return defaultData();
   } catch {
     return defaultData();
@@ -191,7 +302,7 @@ export function loadData() {
 }
 
 export function prepareDataForSave(data) {
-  return sanitizeData({ ...data, updatedAt: nowIso(), schemaVersion: 3 });
+  return sanitizeData({ ...data, updatedAt: nowIso(), schemaVersion: 4 });
 }
 
 export function saveData(data) {
@@ -202,7 +313,7 @@ export function saveData(data) {
 
 export function clearData() {
   localStorage.removeItem(STORAGE_KEY);
-  localStorage.removeItem(LEGACY_STORAGE_KEY);
+  for (const key of LEGACY_KEYS) localStorage.removeItem(key);
 }
 
 export async function loadRemoteData() {

@@ -195,6 +195,33 @@ function normalizeLinks(value) {
   return out;
 }
 
+function stepText(step) {
+  return typeof step === "string" ? step : String(step?.text || "").trim();
+}
+
+function stepId(step) {
+  return typeof step === "string" ? stepText(step) : String(step?.id || step?.text || "").trim();
+}
+
+function linkUrl(link) {
+  return typeof link === "string" ? link : String(link?.url || "").trim();
+}
+
+function linkId(link) {
+  return typeof link === "string" ? linkUrl(link) : String(link?.id || link?.url || "").trim();
+}
+
+function createStep(text) {
+  const s = String(text || "").trim();
+  const type = s.startsWith("@") ? "check" : s.startsWith("!") ? "warning" : s.startsWith("->") || s.startsWith("↑") ? "improvement" : "action";
+  return s ? { id: newId("step"), text: s, type, order: 0, createdAt: new Date().toISOString(), archivedAt: "" } : null;
+}
+
+function createLink(url) {
+  const s = String(url || "").trim();
+  return s ? { id: newId("link"), url: s, title: "", order: 0, createdAt: new Date().toISOString(), lastUsedAt: "", archivedAt: "" } : null;
+}
+
 function toOpenableUrl(raw) {
   const s0 = String(raw || "").trim();
   if (!s0) return null;
@@ -223,9 +250,10 @@ function openLinksPanel(links, title = "共享链接") {
   const valid = [];
   const invalid = [];
   for (const link of links || []) {
-    const url = toOpenableUrl(link);
-    if (url) valid.push(url);
-    else invalid.push(link);
+    const rawUrl = linkUrl(link);
+    const url = toOpenableUrl(rawUrl);
+    if (url) valid.push({ id: linkId(link), url });
+    else invalid.push(rawUrl);
   }
   if (!valid.length) {
     toast("没有可打开的链接");
@@ -237,16 +265,16 @@ function openLinksPanel(links, title = "共享链接") {
     "div",
     { class: "col" },
     h("div", { class: "muted" }, "逐个打开更稳定，也可以复制全部链接。"),
-    h("div", { class: "buttons" }, h("button", { class: "btn", onclick: () => copyToClipboard(valid.join("\n")) }, "复制全部")),
+    h("div", { class: "buttons" }, h("button", { class: "btn", onclick: () => copyToClipboard(valid.map((l) => l.url).join("\n")) }, "复制全部")),
     h(
       "div",
       { class: "list" },
-      ...valid.map((url) =>
+      ...valid.map((link) =>
         h(
           "div",
           { class: "card" },
-          h("div", { class: "muted", text: url }),
-          h("div", { class: "buttons" }, h("a", { class: "btn btn--primary", href: url, target: "_blank", rel: "noopener noreferrer" }, "打开"))
+          h("div", { class: "muted", text: link.url }),
+          h("div", { class: "buttons" }, h("a", { class: "btn btn--primary", href: link.url, target: "_blank", rel: "noopener noreferrer" }, "打开"))
         )
       )
     )
@@ -258,23 +286,32 @@ function getItem(itemId) {
   return (state.data.items || []).find((i) => i.id === itemId) || null;
 }
 
-function getItemSessions(itemId) {
-  return (state.data.sessions || [])
+function getItemPractices(itemId) {
+  return (state.data.practices || [])
     .filter((s) => s.itemId === itemId)
     .sort((a, b) => String(b.endedAt || "").localeCompare(String(a.endedAt || "")));
 }
 
 function getItemStats(item) {
-  const sessions = getItemSessions(item.id);
-  const success = sessions.filter((s) => s.result === "success").length;
-  const fail = sessions.filter((s) => s.result === "fail").length;
-  const last = sessions[0] || null;
+  const practices = getItemPractices(item.id);
+  const success = practices.filter((s) => s.result === "success").length;
+  const fail = practices.filter((s) => s.result === "fail").length;
+  const last = practices[0] || null;
   const failCounts = {};
-  for (const s of sessions) {
+  const progressCounts = { closer: 0, same: 0, off: 0 };
+  let totalChecked = 0;
+  let totalSteps = 0;
+  for (const s of practices) {
     if (s.failReason) failCounts[s.failReason] = (failCounts[s.failReason] || 0) + 1;
+    if (progressCounts[s.progressRating] !== undefined) progressCounts[s.progressRating] += 1;
+    totalChecked += Number(s.stepsChecked || 0);
+    totalSteps += Number(s.stepsTotal || 0);
   }
   const topFail = Object.entries(failCounts).sort((a, b) => b[1] - a[1])[0];
-  return { sessions, total: sessions.length, success, fail, last, topFail };
+  const completionRate = practices.length ? Math.round((success / practices.length) * 100) : 0;
+  const closerRate = practices.length ? Math.round((progressCounts.closer / practices.length) * 100) : 0;
+  const stepCheckRate = totalSteps ? Math.round((totalChecked / totalSteps) * 100) : 0;
+  return { practices, total: practices.length, success, fail, last, topFail, progressCounts, completionRate, closerRate, stepCheckRate };
 }
 
 function sortedItems() {
@@ -302,13 +339,55 @@ function upsertItem(item) {
 
 function deleteItem(itemId) {
   state.data.items = state.data.items.filter((i) => i.id !== itemId);
-  state.data.sessions = state.data.sessions.filter((s) => s.itemId !== itemId);
+  state.data.practices = state.data.practices.filter((s) => s.itemId !== itemId);
   persist();
 }
 
-function appendSession(session) {
-  state.data.sessions = [...(state.data.sessions || []), session].slice(-500);
+function appendPractice(practice) {
+  state.data.practices = [...(state.data.practices || []), practice].slice(-500);
   persist();
+}
+
+function addInboxTask(title, note = "") {
+  const text = String(title || "").trim();
+  if (!text) return null;
+  const task = {
+    id: newId("inbox"),
+    title: text,
+    note: String(note || "").trim(),
+    status: "todo",
+    promotedToItemId: "",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  state.data.inbox = [task, ...(state.data.inbox || [])];
+  persist();
+  return task;
+}
+
+function updateInboxTask(taskId, patch) {
+  state.data.inbox = (state.data.inbox || []).map((t) => (t.id === taskId ? { ...t, ...(patch || {}), updatedAt: new Date().toISOString() } : t));
+  persist();
+}
+
+function deleteInboxTask(taskId) {
+  state.data.inbox = (state.data.inbox || []).filter((t) => t.id !== taskId);
+  persist();
+}
+
+function promoteInboxTask(task) {
+  openItemEditor({
+    id: newId("i"),
+    name: task.title,
+    goal: "",
+    steps: [],
+    links: [],
+    defaultEstimateMin: state.data.settings.defaultEstimateMin,
+    nextPracticeFocus: "",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    _fromInboxId: task.id,
+  });
 }
 
 function openItemEditor(item) {
@@ -320,25 +399,84 @@ function openItemEditor(item) {
     steps: [],
     links: [],
     defaultEstimateMin: state.data.settings.defaultEstimateMin,
-    lastPracticeFocus: "",
+    nextPracticeFocus: "",
     createdAt: new Date().toISOString(),
   };
 
   const nameInput = h("input", { value: initial.name, placeholder: "例如：写公众号 / 剪视频 / 英语口语" });
   const goalInput = h("textarea", { text: initial.goal, placeholder: "这个事项长期想靠近什么目标？例如：写出更有转化力、有观点、有行动的文章" });
-  const stepsInput = h("textarea", {
-    text: (initial.steps || []).join("\n"),
-    placeholder: "每行一个步骤或检查；可用前缀：! 注意 / @ 检查 / -> 提升点",
-  });
-  const linksInput = h("textarea", { text: (initial.links || []).join("\n"), placeholder: "共享链接：每行一个，例如文档、素材库、后台" });
+  let stepsDraft = [...(initial.steps || [])];
+  let draggingStepIndex = null;
+  const stepsList = h("div", { class: "stepEditor" });
+  const newStepInput = h("input", { placeholder: "新增步骤或检查，例如：@ 开头是否有具体场景？" });
+  const linksInput = h("textarea", { text: (initial.links || []).map(linkUrl).join("\n"), placeholder: "共享链接：每行一个，例如文档、素材库、后台" });
   const estimateInput = h("input", { type: "number", min: "1", value: String(initial.defaultEstimateMin || state.data.settings.defaultEstimateMin) });
+
+  function moveStep(from, to) {
+    if (to < 0 || to >= stepsDraft.length || from === to) return;
+    const next = [...stepsDraft];
+    const [item] = next.splice(from, 1);
+    next.splice(to, 0, item);
+    stepsDraft = next;
+    rebuildSteps();
+  }
+
+  function rebuildSteps() {
+    stepsList.replaceChildren(
+      ...(stepsDraft.length
+        ? stepsDraft.map((step, index) =>
+            h(
+              "div",
+              {
+                class: "stepRow",
+                draggable: "true",
+                ondragstart: () => {
+                  draggingStepIndex = index;
+                },
+                ondragover: (e) => e.preventDefault(),
+                ondrop: (e) => {
+                  e.preventDefault();
+                  if (draggingStepIndex === null) return;
+                  moveStep(draggingStepIndex, index);
+                  draggingStepIndex = null;
+                },
+              },
+              h("div", { class: "stepHandle", text: "↕" }),
+              h("div", { class: "stepText", text: stepText(step) }),
+              h("button", { class: "btn", onclick: () => moveStep(index, index - 1) }, "↑"),
+              h("button", { class: "btn", onclick: () => moveStep(index, index + 1) }, "↓"),
+              h("button", { class: "btn btn--danger", onclick: () => { stepsDraft = stepsDraft.filter((_, i) => i !== index); rebuildSteps(); } }, "删")
+            )
+          )
+        : [h("div", { class: "muted", text: "还没有步骤与检查。" })])
+    );
+  }
+
+  function addStepFromInput() {
+    const value = newStepInput.value.trim();
+    if (!value) {
+      newStepInput.focus();
+      return;
+    }
+    stepsDraft = [...stepsDraft, createStep(value)];
+    newStepInput.value = "";
+    rebuildSteps();
+  }
+
+  rebuildSteps();
 
   const body = h(
     "div",
     { class: "col" },
     h("div", {}, h("label", { text: "事项名" }), nameInput),
     h("div", {}, h("label", { text: "长期目标" }), goalInput),
-    h("div", {}, h("label", { text: "步骤与检查" }), stepsInput),
+    h(
+      "div",
+      {},
+      h("label", { text: "步骤与检查（可拖动排序）" }),
+      stepsList,
+      h("div", { class: "inlineAdd" }, newStepInput, h("button", { class: "btn", onclick: addStepFromInput }, "+ 添加"))
+    ),
     h("div", {}, h("label", { text: "共享链接" }), linksInput),
     h("div", {}, h("label", { text: "默认预计用时（分钟）" }), estimateInput)
   );
@@ -361,11 +499,14 @@ function openItemEditor(item) {
             ...initial,
             name,
             goal: goalInput.value.trim(),
-            steps: normalizeLines(stepsInput.value),
-            links: normalizeLinks(linksInput.value),
+            steps: stepsDraft.map((s, order) => (typeof s === "string" ? createStep(s) : { ...s, order })).filter((s) => stepText(s)),
+            links: normalizeLinks(linksInput.value).map((url, order) => ({ ...createLink(url), order })),
             defaultEstimateMin: Math.max(1, Number.parseInt(estimateInput.value || "1", 10)),
             updatedAt: new Date().toISOString(),
           });
+          if (initial._fromInboxId) {
+            updateInboxTask(initial._fromInboxId, { status: "done", promotedToItemId: initial.id });
+          }
           ctrl.close();
           toast(isNew ? "已创建事项" : "已保存事项");
           render();
@@ -384,7 +525,7 @@ function openPracticeSetup(item) {
   const stats = getItemStats(item);
   const taskInput = h("input", { value: `练一次：${item.name}`, placeholder: "这次具体要完成什么？" });
   const focusInput = h("input", {
-    value: item.lastPracticeFocus || "",
+    value: item.nextPracticeFocus || "",
     maxlength: "80",
     placeholder: "这一次更靠近目标的一小步是什么？",
   });
@@ -397,7 +538,7 @@ function openPracticeSetup(item) {
     { class: "col" },
     h("div", { class: "h1", text: item.name }),
     item.goal ? h("div", { class: "muted" }, `长期目标：${item.goal}`) : h("div", { class: "muted" }, "这个事项还没有长期目标。建议先补一句目标。"),
-    stats.last ? h("div", { class: "muted" }, `最近一次：${formatDate(stats.last.endedAt)} / ${stats.last.practiceFocus || "未填写练习目标"}`) : null,
+    stats.last ? h("div", { class: "muted" }, `最近一次：${formatDate(stats.last.endedAt)} / ${stats.last.focus || "未填写练习目标"}`) : null,
     h("div", { class: "divider" }),
     h("div", {}, h("label", { text: "本次任务" }), taskInput),
     h("div", {}, h("label", { text: "本次练习目标" }), focusInput),
@@ -423,7 +564,7 @@ function openPracticeSetup(item) {
           const estimateMin = Math.max(1, Number.parseInt(estimateInput.value || "1", 10));
           startPractice(item, {
             taskTitle,
-            practiceFocus: focusInput.value.trim(),
+            focus: focusInput.value.trim(),
             estimateMin,
             useSteps: Boolean(useStepsInput.checked && !useStepsInput.disabled),
             openLinks: Boolean(openLinksInput.checked && !openLinksInput.disabled),
@@ -432,6 +573,22 @@ function openPracticeSetup(item) {
         },
       },
       "开始练习"
+    ),
+    h(
+      "button",
+      {
+        class: "btn",
+        onclick: () => {
+          item.nextPracticeFocus = focusInput.value.trim();
+          item.defaultEstimateMin = Math.max(1, Number.parseInt(estimateInput.value || "1", 10));
+          item.updatedAt = new Date().toISOString();
+          upsertItem(item);
+          ctrl.close();
+          toast("已保存为下次练习目标");
+          render();
+        },
+      },
+      "保存为下次目标"
     ),
     h("button", { class: "btn", onclick: () => ctrl.close() }, "取消")
   );
@@ -443,42 +600,63 @@ function openPracticeSetup(item) {
 function startPractice(item, opts) {
   if (opts.openLinks && item.links?.length) openLinksPanel(item.links, `共享链接：${item.name}`);
   const startedAt = Date.now();
+  const initialOpenedLinkIds = opts.openLinks ? (item.links || []).map(linkId).filter(Boolean) : [];
   state.session = {
     itemId: item.id,
     taskTitle: opts.taskTitle,
-    practiceFocus: opts.practiceFocus,
+    focus: opts.focus,
     estimateMin: opts.estimateMin,
     useSteps: opts.useSteps,
+    checkedStepIds: [],
+    openedLinkIds: initialOpenedLinkIds,
+    addedLinkIds: [],
     startedAt,
     endsAt: startedAt + opts.estimateMin * 60_000,
     noteDraft: "",
   };
-  item.lastPracticeFocus = opts.practiceFocus || item.lastPracticeFocus || "";
+  item.nextPracticeFocus = opts.focus || item.nextPracticeFocus || "";
   item.defaultEstimateMin = opts.estimateMin;
   item.updatedAt = new Date().toISOString();
   upsertItem(item);
   setView("focus");
 }
 
-function buildSessionBase(item, endedAtMs = Date.now()) {
+function buildPracticeBase(item, endedAtMs = Date.now()) {
   const sess = state.session;
+  const checkedStepIds = Array.isArray(sess.checkedStepIds) ? sess.checkedStepIds : [];
+  const openedLinkIds = Array.isArray(sess.openedLinkIds) ? sess.openedLinkIds : [];
+  const addedLinkIds = Array.isArray(sess.addedLinkIds) ? sess.addedLinkIds : [];
+  const stepsTotal = sess.useSteps ? (item.steps || []).filter((s) => !s.archivedAt).length : 0;
+  const linksTotal = (item.links || []).filter((l) => !l.archivedAt).length;
   return {
-    id: newId("s"),
+    id: newId("practice"),
     itemId: item.id,
-    itemName: item.name,
+    itemNameSnapshot: item.name,
     taskTitle: sess.taskTitle,
     goalSnapshot: item.goal || "",
-    practiceFocus: sess.practiceFocus || "",
+    focus: sess.focus || "",
     startedAt: new Date(sess.startedAt).toISOString(),
     endedAt: new Date(endedAtMs).toISOString(),
     plannedMin: sess.estimateMin,
     actualSec: Math.max(0, Math.round((endedAtMs - sess.startedAt) / 1000)),
+    note: String(sess.noteDraft || "").trim(),
+    stepsTotal,
+    stepsChecked: checkedStepIds.length,
+    checkedStepIds,
+    linksTotal,
+    linksOpenedCount: openedLinkIds.length,
+    linksAddedCount: addedLinkIds.length,
+    openedLinkIds,
+    addedLinkIds,
   };
 }
 
-function openSuccessReview(item, sessionBase) {
+function openSuccessReview(item, practiceBase) {
   let selected = "";
-  const reminderInput = h("input", { placeholder: "下次提醒自己什么？例如：开头别解释背景，直接进入场景" });
+  const reminderInput = h("input", {
+    value: practiceBase.note || "",
+    placeholder: "下次提醒自己什么？例如：开头别解释背景，直接进入场景",
+  });
   const addReminderInput = h("input", { type: "checkbox", checked: "checked" });
 
   const progressList = h(
@@ -490,7 +668,7 @@ function openSuccessReview(item, sessionBase) {
         { class: "check" },
         h("input", {
           type: "radio",
-          name: "goalProgress",
+          name: "progressRating",
           value: opt.code,
           onchange: (e) => {
             selected = e.target.value;
@@ -508,6 +686,7 @@ function openSuccessReview(item, sessionBase) {
     item.goal ? h("div", { class: "muted" }, `长期目标：${item.goal}`) : null,
     h("div", { class: "muted" }, "这次是否更靠近事项目标？"),
     progressList,
+    practiceBase.note ? h("div", { class: "noteBox" }, h("div", { class: "muted", text: "本次笔记" }), h("div", { text: practiceBase.note })) : null,
     h("div", { class: "divider" }),
     h("div", {}, h("label", { text: "下次提醒（可选）" }), reminderInput),
     h("label", { class: "check" }, addReminderInput, h("div", {}, h("div", { class: "taskTitle", text: "加入步骤与检查" }), h("div", { class: "muted" }, "把这条提醒沉淀到该事项里，下次会自动出现")))
@@ -520,12 +699,15 @@ function openSuccessReview(item, sessionBase) {
       disabled: "disabled",
       onclick: () => {
         const reminder = reminderInput.value.trim();
+        let addedReminderToSteps = false;
         if (reminder && addReminderInput.checked) {
-          item.steps = [...(item.steps || []), reminder.startsWith("!") || reminder.startsWith("@") || reminder.startsWith("->") ? reminder : `! ${reminder}`];
+          const reminderText = reminder.startsWith("!") || reminder.startsWith("@") || reminder.startsWith("->") ? reminder : `! ${reminder}`;
+          item.steps = [...(item.steps || []), createStep(reminderText)];
           item.updatedAt = new Date().toISOString();
           upsertItem(item);
+          addedReminderToSteps = true;
         }
-        appendSession({ ...sessionBase, result: "success", goalProgress: selected, reminder });
+        appendPractice({ ...practiceBase, result: "success", progressRating: selected, reminder, addedReminderToSteps });
         state.data.stats.points += state.data.settings.completePoints;
         state.data.stats.streak += 1;
         state.session = null;
@@ -541,8 +723,9 @@ function openSuccessReview(item, sessionBase) {
   const ctrl = openModal({ title: "完成复盘", body, footer: h("div", { class: "buttons" }, confirmBtn), dismissible: false });
 }
 
-function openFailReview(item, sessionBase, trigger) {
+function openFailReview(item, practiceBase, trigger) {
   let selected = "";
+  const addNoteInput = h("input", { type: "checkbox", checked: practiceBase.note ? "checked" : null, disabled: practiceBase.note ? null : "disabled" });
   const body = h(
     "div",
     { class: "col" },
@@ -562,7 +745,9 @@ function openFailReview(item, sessionBase, trigger) {
         }),
         h("div", {}, h("div", { class: "taskTitle", text: reason.label }))
       )
-    )
+    ),
+    practiceBase.note ? h("div", { class: "noteBox" }, h("div", { class: "muted", text: "本次笔记" }), h("div", { text: practiceBase.note })) : null,
+    h("label", { class: "check" }, addNoteInput, h("div", {}, h("div", { class: "taskTitle", text: "把笔记加入步骤与检查" }), h("div", { class: "muted" }, "失败时的卡点通常最值得下次提醒")))
   );
 
   const confirmBtn = h(
@@ -571,7 +756,15 @@ function openFailReview(item, sessionBase, trigger) {
       class: "btn btn--primary",
       disabled: "disabled",
       onclick: () => {
-        appendSession({ ...sessionBase, result: "fail", failReason: selected, failTrigger: trigger });
+        let addedReminderToSteps = false;
+        if (practiceBase.note && addNoteInput.checked) {
+          const noteText = practiceBase.note.startsWith("!") || practiceBase.note.startsWith("@") || practiceBase.note.startsWith("->") ? practiceBase.note : `! ${practiceBase.note}`;
+          item.steps = [...(item.steps || []), createStep(noteText)];
+          item.updatedAt = new Date().toISOString();
+          upsertItem(item);
+          addedReminderToSteps = true;
+        }
+        appendPractice({ ...practiceBase, result: "fail", failReason: selected, failTrigger: trigger, reminder: practiceBase.note, addedReminderToSteps });
         state.data.stats.points += state.data.settings.failPoints;
         if (state.data.settings.streakResetOnFail) state.data.stats.streak = 0;
         state.session = null;
@@ -593,6 +786,17 @@ function renderHome() {
   const addBtn = h("button", { class: "btn", onclick: () => openItemEditor() }, "+ 新建事项");
   const itemsBtn = h("button", { class: "btn", onclick: () => setView("items") }, "事项库");
   const settingsBtn = h("button", { class: "btn", onclick: () => setView("settings") }, "设置");
+  const inboxInput = h("input", { placeholder: "临时任务、突然想到的事..." });
+  const captureInbox = () => {
+    const task = addInboxTask(inboxInput.value);
+    if (!task) {
+      inboxInput.focus();
+      return;
+    }
+    inboxInput.value = "";
+    toast("已放进收集箱");
+    render();
+  };
 
   if (!recommended) {
     return h(
@@ -630,7 +834,7 @@ function renderHome() {
         recommended.links?.length ? h("span", { class: "tag", text: `链接 ${recommended.links.length}` }) : null
       ),
       recommended.goal ? h("div", { class: "focusLine" }, h("span", { text: "长期目标" }), h("strong", { text: recommended.goal })) : null,
-      recommended.lastPracticeFocus ? h("div", { class: "doneLine" }, h("span", { text: "下次练习" }), h("strong", { text: recommended.lastPracticeFocus })) : null,
+      recommended.nextPracticeFocus ? h("div", { class: "doneLine" }, h("span", { text: "下次练习" }), h("strong", { text: recommended.nextPracticeFocus })) : null,
       h("div", { class: "muted", text: `常见问题：${topFail}` }),
       h(
         "div",
@@ -643,9 +847,40 @@ function renderHome() {
     h(
       "section",
       { class: "homeGrid" },
-      ...items.slice(0, 6).map(renderItemCard)
+      h("div", { class: "sectionTitle", text: "全部事项" }),
+      ...items.map(renderItemCard)
+    ),
+    h(
+      "section",
+      { class: "card" },
+      h("div", { class: "row" }, h("div", { class: "h1", text: "收集箱" }), h("div", { class: "muted", text: "临时待办不进入事项主线" })),
+      h("div", { class: "divider" }),
+      h("div", { class: "inlineAdd" }, inboxInput, h("button", { class: "btn", onclick: captureInbox }, "+ 记一下")),
+      h("div", { class: "divider" }),
+      renderInboxList()
     ),
     h("div", { class: "homeNav" }, addBtn, itemsBtn, settingsBtn)
+  );
+}
+
+function renderInboxList() {
+  const tasks = [...(state.data.inbox || [])].filter((t) => t.status !== "done");
+  if (!tasks.length) return h("div", { class: "muted", text: "收集箱是空的。" });
+  return h("div", { class: "list" }, ...tasks.map(renderInboxTask));
+}
+
+function renderInboxTask(task) {
+  return h(
+    "div",
+    { class: "inboxRow" },
+    h("div", {}, h("div", { class: "taskTitle", text: task.title }), task.note ? h("div", { class: "muted", text: task.note }) : null),
+    h(
+      "div",
+      { class: "buttons" },
+      h("button", { class: "btn", onclick: () => { updateInboxTask(task.id, { status: "done" }); toast("已完成"); render(); } }, "完成"),
+      h("button", { class: "btn btn--primary", onclick: () => promoteInboxTask(task) }, "转为事项"),
+      h("button", { class: "btn btn--danger", onclick: () => { deleteInboxTask(task.id); toast("已删除"); render(); } }, "删除")
+    )
   );
 }
 
@@ -656,6 +891,9 @@ function renderItemCard(item) {
     { class: "itemCard" },
     h("div", { class: "row" }, h("div", { class: "h1", text: item.name }), h("div", { class: "meta" }, h("span", { class: "tag", text: `${stats.total} 次` }))),
     item.goal ? h("div", { class: "muted", text: item.goal }) : h("div", { class: "muted", text: "还没有长期目标" }),
+    stats.total
+      ? h("div", { class: "meta" }, h("span", { class: "tag", text: `完成率 ${stats.completionRate}%` }), h("span", { class: "tag", text: `靠近率 ${stats.closerRate}%` }), h("span", { class: "tag", text: `步骤 ${stats.stepCheckRate}%` }))
+      : null,
     stats.last ? h("div", { class: "muted", text: `最近：${formatDate(stats.last.endedAt)}` }) : h("div", { class: "muted", text: "还没有练习记录" }),
     h(
       "div",
@@ -688,13 +926,22 @@ function renderItemsView() {
 
 function renderItemDetailCard(item) {
   const stats = getItemStats(item);
-  const recent = stats.sessions.slice(0, 3);
+  const recent = stats.practices.slice(0, 3);
   return h(
     "div",
     { class: "card" },
     h("div", { class: "row" }, h("div", { class: "h1", text: item.name }), h("div", { class: "meta" }, h("span", { class: "tag", text: `${stats.total} 次练习` }), h("span", { class: "tag", text: `${item.steps?.length || 0} 步骤` }), h("span", { class: "tag", text: `${item.links?.length || 0} 链接` }))),
+    stats.total
+      ? h(
+          "div",
+          { class: "metricGrid" },
+          h("div", { class: "metricBox" }, h("div", { class: "muted", text: "完成率" }), h("strong", { text: `${stats.completionRate}%` })),
+          h("div", { class: "metricBox" }, h("div", { class: "muted", text: "靠近目标" }), h("strong", { text: `${stats.closerRate}%` })),
+          h("div", { class: "metricBox" }, h("div", { class: "muted", text: "步骤勾选" }), h("strong", { text: `${stats.stepCheckRate}%` }))
+        )
+      : null,
     item.goal ? h("div", { class: "muted", text: `目标：${item.goal}` }) : h("div", { class: "muted", text: "目标：未填写" }),
-    item.steps?.length ? h("div", { class: "muted", text: `步骤与检查：${item.steps.slice(0, 3).join(" · ")}${item.steps.length > 3 ? " ..." : ""}` }) : null,
+    item.steps?.length ? h("div", { class: "muted", text: `步骤与检查：${item.steps.slice(0, 3).map(stepText).join(" · ")}${item.steps.length > 3 ? " ..." : ""}` }) : null,
     recent.length
       ? h(
           "div",
@@ -702,8 +949,13 @@ function renderItemDetailCard(item) {
           ...recent.map((s) =>
             h(
               "div",
-              { class: "muted" },
-              `${formatDate(s.endedAt)} / ${s.result === "success" ? GOAL_PROGRESS_LABELS[s.goalProgress] || "完成" : FAIL_REASON_LABELS[s.failReason] || "失败"} / ${s.practiceFocus || s.taskTitle}`
+              { class: "noteBox" },
+              h(
+                "div",
+                { class: "muted" },
+                `${formatDate(s.endedAt)} / ${s.result === "success" ? GOAL_PROGRESS_LABELS[s.progressRating] || "完成" : FAIL_REASON_LABELS[s.failReason] || "失败"} / ${s.focus || s.taskTitle} / 步骤 ${s.stepsChecked || 0}/${s.stepsTotal || 0} / 链接 +${s.linksAddedCount || 0}`
+              ),
+              s.note ? h("div", { text: s.note }) : null
             )
           )
         )
@@ -713,7 +965,7 @@ function renderItemDetailCard(item) {
       { class: "buttons" },
       h("button", { class: "btn btn--primary", onclick: () => openPracticeSetup(item) }, "继续练一次"),
       h("button", { class: "btn", onclick: () => openItemEditor(item) }, "编辑"),
-      h("button", { class: "btn", onclick: () => copyToClipboard((item.steps || []).join("\n")) }, "复制步骤"),
+      h("button", { class: "btn", onclick: () => copyToClipboard((item.steps || []).map(stepText).join("\n")) }, "复制步骤"),
       h(
         "button",
         {
@@ -807,11 +1059,81 @@ function renderFocus() {
   noteInput.addEventListener("input", () => {
     state.session.noteDraft = noteInput.value;
   });
+  const linkInput = h("input", { placeholder: "练习中发现的新链接，粘贴后加入事项" });
+  const linksList = h("div", { class: "list" });
+  const distractInput = h("input", { placeholder: "分心了？把想到的事丢进收集箱" });
+
+  function rebuildFocusLinks() {
+    linksList.replaceChildren(
+      ...(item.links?.length
+        ? item.links.map((link) =>
+            h(
+              "div",
+              { class: "linkRow" },
+              h("div", { class: "muted", text: linkUrl(link) }),
+              h(
+                "div",
+                { class: "buttons" },
+                h("button", {
+                  class: "btn",
+                  onclick: () => {
+                    const id = linkId(link);
+                    state.session.openedLinkIds = Array.from(new Set([...(state.session.openedLinkIds || []), id].filter(Boolean)));
+                    openLinksPanel([link], "打开链接");
+                  },
+                }, "打开")
+              )
+            )
+          )
+        : [h("div", { class: "muted", text: "还没有共享链接。" })])
+    );
+  }
+
+  function addFocusLink() {
+    const value = linkInput.value.trim();
+    if (!value) {
+      linkInput.focus();
+      return;
+    }
+    const newLink = createLink(value);
+    item.links = [...(item.links || []), { ...newLink, order: item.links?.length || 0 }];
+    item.updatedAt = new Date().toISOString();
+    upsertItem(item);
+    state.session.addedLinkIds = Array.from(new Set([...(state.session.addedLinkIds || []), newLink.id]));
+    linkInput.value = "";
+    rebuildFocusLinks();
+    toast("链接已加入事项");
+  }
+
+  function captureDistractor() {
+    const task = addInboxTask(distractInput.value);
+    if (!task) {
+      distractInput.focus();
+      return;
+    }
+    distractInput.value = "";
+    toast("已放进收集箱，继续当前练习");
+  }
+
+  rebuildFocusLinks();
 
   const checklist = h(
     "div",
     { class: "checklist" },
-    ...(sess.useSteps ? item.steps || [] : []).map((step) => h("label", { class: "check" }, h("input", { type: "checkbox" }), h("div", { class: "taskTitle", text: step })))
+    ...(sess.useSteps ? item.steps || [] : []).map((step) => {
+      const id = stepId(step);
+      const input = h("input", {
+        type: "checkbox",
+        checked: (sess.checkedStepIds || []).includes(id) ? "checked" : null,
+        onchange: (e) => {
+          const current = new Set(state.session.checkedStepIds || []);
+          if (e.target.checked) current.add(id);
+          else current.delete(id);
+          state.session.checkedStepIds = Array.from(current);
+        },
+      });
+      return h("label", { class: "check" }, input, h("div", { class: "taskTitle", text: stepText(step) }));
+    })
   );
 
   const completeBtn = h(
@@ -820,7 +1142,7 @@ function renderFocus() {
       class: "btn btn--primary",
       onclick: () => {
         stopFocusTicker();
-        openSuccessReview(item, buildSessionBase(item));
+        openSuccessReview(item, buildPracticeBase(item));
       },
     },
     "完成"
@@ -834,7 +1156,7 @@ function renderFocus() {
         const ok = window.confirm("确定放弃？将进入失败复盘。");
         if (!ok) return;
         stopFocusTicker();
-        openFailReview(item, buildSessionBase(item), "abandon");
+        openFailReview(item, buildPracticeBase(item), "abandon");
       },
     },
     "放弃"
@@ -851,13 +1173,29 @@ function renderFocus() {
       h("div", { class: "h1", text: sess.taskTitle }),
       h("div", { class: "muted", text: `事项：${item.name}` }),
       item.goal ? h("div", { class: "focusLine" }, h("span", { text: "长期目标" }), h("strong", { text: item.goal })) : null,
-      sess.practiceFocus ? h("div", { class: "doneLine" }, h("span", { text: "本次练习" }), h("strong", { text: sess.practiceFocus })) : null,
-      item.links?.length ? h("div", { class: "buttons" }, h("button", { class: "btn", onclick: () => openLinksPanel(item.links, `共享链接：${item.name}`) }, "打开共享链接")) : null,
+      sess.focus ? h("div", { class: "doneLine" }, h("span", { text: "本次练习" }), h("strong", { text: sess.focus })) : null,
       checklist.children.length ? h("div", { class: "divider" }) : null,
       checklist.children.length ? h("div", { class: "muted", text: "步骤与检查" }) : null,
       checklist.children.length ? checklist : null,
       h("div", { class: "divider" }),
       h("div", { class: "buttons" }, completeBtn, abandonBtn)
+    ),
+    h(
+      "div",
+      { class: "card" },
+      h("div", { class: "h1", text: "共享链接" }),
+      h("div", { class: "divider" }),
+      linksList,
+      h("div", { class: "divider" }),
+      h("div", { class: "inlineAdd" }, linkInput, h("button", { class: "btn", onclick: addFocusLink }, "+ 加入事项"))
+    ),
+    h(
+      "div",
+      { class: "card" },
+      h("div", { class: "h1", text: "收集箱" }),
+      h("div", { class: "muted", text: "想到别的事，先记下，不打断当前练习。" }),
+      h("div", { class: "divider" }),
+      h("div", { class: "inlineAdd" }, distractInput, h("button", { class: "btn", onclick: captureDistractor }, "+ 放进收集箱"))
     ),
     h("div", { class: "card" }, h("div", { class: "h1", text: "练习笔记" }), h("div", { class: "divider" }), noteInput)
   );
@@ -869,7 +1207,7 @@ function renderFocus() {
     document.title = `${formatMs(left)} · ${sess.taskTitle}`;
     if (left <= 0) {
       stopFocusTicker();
-      openFailReview(item, buildSessionBase(item), "timeout");
+      openFailReview(item, buildPracticeBase(item), "timeout");
     }
   }, 250);
 

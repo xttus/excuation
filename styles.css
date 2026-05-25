@@ -370,6 +370,93 @@ button:disabled {
   box-shadow: var(--shadow);
 }
 
+.sectionTitle {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+@media (min-width: 760px) {
+  .sectionTitle {
+    grid-column: 1 / -1;
+  }
+}
+
+.inlineAdd {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.stepEditor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.stepRow,
+.linkRow,
+.inboxRow {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel2);
+}
+
+.linkRow {
+  grid-template-columns: 1fr auto;
+}
+
+.inboxRow {
+  grid-template-columns: 1fr auto;
+}
+
+.stepHandle {
+  color: var(--muted);
+  cursor: grab;
+  font-weight: 800;
+}
+
+.stepText {
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.noteBox {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--panel2) 78%, transparent);
+  line-height: 1.5;
+}
+
+.metricGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.metricBox {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--panel2) 72%, transparent);
+}
+
+.metricBox strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 20px;
+}
+
 .grid2 {
   display: grid;
   grid-template-columns: 1fr;
@@ -570,5 +657,17 @@ textarea {
 
   .buttons {
     justify-content: flex-start;
+  }
+
+  .inlineAdd,
+  .stepRow,
+  .linkRow,
+  .inboxRow,
+  .metricGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .stepHandle {
+    display: none;
   }
 }

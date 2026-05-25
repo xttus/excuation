@@ -6,7 +6,8 @@ const ROOT = __dirname;
 const PORT = Number.parseInt(process.env.PORT || "5173", 10);
 const HOST = process.env.HOST || "0.0.0.0";
 const DATA_DIR = path.join(ROOT, "data");
-const DATA_FILE = path.join(DATA_DIR, "execpanel-v3.json");
+const DATA_FILE = path.join(DATA_DIR, "execpanel-v4.json");
+const LEGACY_DATA_FILES = [path.join(DATA_DIR, "execpanel-v3.json"), path.join(DATA_DIR, "execpanel-v1.json")];
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -50,7 +51,20 @@ async function handleDataApi(req, res) {
       });
       res.end(text);
     } catch (e) {
-      if (e.code === "ENOENT") return sendJson(res, 200, null);
+      if (e.code === "ENOENT") {
+        for (const legacyFile of LEGACY_DATA_FILES) {
+          try {
+            const text = await fs.promises.readFile(legacyFile, "utf8");
+            res.writeHead(200, {
+              "content-type": "application/json; charset=utf-8",
+              "cache-control": "no-store",
+            });
+            res.end(text);
+            return;
+          } catch {}
+        }
+        return sendJson(res, 200, null);
+      }
       return sendJson(res, 500, { error: "read_failed" });
     }
     return;
