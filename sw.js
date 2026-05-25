@@ -1,6 +1,6 @@
 /* Minimal offline cache for static assets (served over http/https). */
 // Bump this to invalidate old caches when shipping changes.
-const CACHE_NAME = "execpanel-mvp-v8";
+const CACHE_NAME = "execpanel-mvp-v11";
 const ASSETS = ["./", "./index.html", "./styles.css", "./app.js", "./storage.js", "./manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {

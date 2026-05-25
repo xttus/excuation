@@ -102,6 +102,16 @@ a {
   font-size: 12px;
 }
 
+.pill--ok {
+  border-color: color-mix(in srgb, var(--ok) 40%, var(--border));
+  color: color-mix(in srgb, var(--ok) 80%, var(--text));
+}
+
+.pill--warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  color: color-mix(in srgb, var(--warn) 82%, var(--text));
+}
+
 .container {
   padding: 22px 16px 56px;
   max-width: 900px;
@@ -334,6 +344,30 @@ button:disabled {
   gap: 10px;
   justify-content: center;
   padding: 4px 0;
+}
+
+.homeGrid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+@media (min-width: 760px) {
+  .homeGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.itemCard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 190px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--panel) 90%, transparent);
+  box-shadow: var(--shadow);
 }
 
 .grid2 {

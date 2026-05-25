@@ -1,20 +1,39 @@
-const STORAGE_KEY = "execPanel:v1";
+const STORAGE_KEY = "execPanel:v3";
+const LEGACY_STORAGE_KEY = "execPanel:v1";
+const REMOTE_ENDPOINT = "./api/data";
 
 function nowIso() {
   return new Date().toISOString();
 }
 
+function coerceInt(v, fallback) {
+  const n = Number.parseInt(String(v), 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function normalizeLines(value) {
+  if (Array.isArray(value)) {
+    return value.filter((s) => typeof s === "string").map((s) => s.trim()).filter(Boolean);
+  }
+  if (typeof value !== "string") return [];
+  return value.split(/\r?\n/g).map((s) => s.trim()).filter(Boolean);
+}
+
+function normalizeLinks(value) {
+  const seen = new Set();
+  const out = [];
+  for (const s of normalizeLines(value)) {
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
 function defaultData() {
   return {
-    schemaVersion: 2,
-    tasks: [],
-    // Map: sopKey -> steps[]
-    sops: {},
-    // Map: sopKey -> links[]
-    sopLinks: {},
-    // Map: sopKey -> boolean (true means: always auto-open links on start)
-    sopAutoOpenLinks: {},
-    // Practice sessions history (append-only; keep last N in UI/service layer).
+    schemaVersion: 3,
+    items: [],
     sessions: [],
     stats: {
       points: 0,
@@ -26,152 +45,195 @@ function defaultData() {
       failPoints: -3,
       streakResetOnFail: true,
     },
-    lastTaskOrder: 0,
     updatedAt: nowIso(),
   };
 }
 
-function coerceInt(v, fallback) {
-  const n = Number.parseInt(String(v), 10);
-  return Number.isFinite(n) ? n : fallback;
+function normalizeItem(raw) {
+  const name = String(raw?.name || raw?.title || raw?.sopKey || "").trim();
+  const id = String(raw?.id || "").trim() || newId("i");
+  return {
+    id,
+    name,
+    goal: String(raw?.goal || "").trim(),
+    steps: normalizeLines(raw?.steps),
+    links: normalizeLinks(raw?.links),
+    defaultEstimateMin: coerceInt(raw?.defaultEstimateMin ?? raw?.estimateMin, 25),
+    lastPracticeFocus: String(raw?.lastPracticeFocus || "").trim(),
+    createdAt: typeof raw?.createdAt === "string" ? raw.createdAt : nowIso(),
+    updatedAt: typeof raw?.updatedAt === "string" ? raw.updatedAt : nowIso(),
+  };
 }
 
-function sanitizeLoadedData(raw) {
+function normalizeSession(raw) {
+  const result = raw?.result === "fail" ? "fail" : raw?.result === "success" ? "success" : "";
+  return {
+    id: String(raw?.id || "").trim() || newId("s"),
+    itemId: String(raw?.itemId || "").trim(),
+    itemName: String(raw?.itemName || raw?.sopKey || "").trim(),
+    taskTitle: String(raw?.taskTitle || "").trim(),
+    goalSnapshot: String(raw?.goalSnapshot || "").trim(),
+    practiceFocus: String(raw?.practiceFocus || "").trim(),
+    startedAt: typeof raw?.startedAt === "string" ? raw.startedAt : "",
+    endedAt: typeof raw?.endedAt === "string" ? raw.endedAt : "",
+    plannedMin: coerceInt(raw?.plannedMin, 0),
+    actualSec: coerceInt(raw?.actualSec, 0),
+    result,
+    goalProgress: raw?.goalProgress === "closer" || raw?.goalProgress === "same" || raw?.goalProgress === "off" ? raw.goalProgress : "",
+    failReason: String(raw?.failReason || "").trim(),
+    failTrigger: String(raw?.failTrigger || "").trim(),
+    reminder: String(raw?.reminder || "").trim(),
+  };
+}
+
+function migrateLegacy(raw) {
   const base = defaultData();
   if (!raw || typeof raw !== "object") return base;
 
-  const out = { ...base, ...raw };
-  out.schemaVersion = 2;
-
-  out.stats = {
-    points: coerceInt(raw?.stats?.points, base.stats.points),
-    streak: coerceInt(raw?.stats?.streak, base.stats.streak),
+  const itemByName = new Map();
+  const ensureItem = (name) => {
+    const key = String(name || "").trim();
+    if (!key) return null;
+    if (itemByName.has(key)) return itemByName.get(key);
+    const item = normalizeItem({
+      id: newId("i"),
+      name: key,
+      goal: "",
+      steps: Array.isArray(raw.sops?.[key]) ? raw.sops[key] : [],
+      links: Array.isArray(raw.sopLinks?.[key]) ? raw.sopLinks[key] : [],
+      createdAt: nowIso(),
+      updatedAt: raw.updatedAt || nowIso(),
+    });
+    itemByName.set(key, item);
+    return item;
   };
 
-  out.settings = {
-    defaultEstimateMin: coerceInt(raw?.settings?.defaultEstimateMin, base.settings.defaultEstimateMin),
-    completePoints: coerceInt(raw?.settings?.completePoints, base.settings.completePoints),
-    failPoints: coerceInt(raw?.settings?.failPoints, base.settings.failPoints),
-    streakResetOnFail: Boolean(
-      raw?.settings?.streakResetOnFail ?? base.settings.streakResetOnFail
-    ),
+  for (const t of Array.isArray(raw.tasks) ? raw.tasks : []) {
+    const name = String(t?.sopKey || t?.title || "").trim();
+    const item = ensureItem(name);
+    if (!item) continue;
+    if (!item.lastPracticeFocus && typeof t?.lastPracticeFocus === "string") item.lastPracticeFocus = t.lastPracticeFocus.trim();
+    item.defaultEstimateMin = coerceInt(t?.estimateMin, item.defaultEstimateMin);
+    item.links = normalizeLinks([...(item.links || []), ...(Array.isArray(t?.links) ? t.links : [])]);
+  }
+
+  for (const key of Object.keys(raw.sops || {})) ensureItem(key);
+  for (const key of Object.keys(raw.sopLinks || {})) ensureItem(key);
+
+  const sessions = (Array.isArray(raw.sessions) ? raw.sessions : [])
+    .map((s) => {
+      const item = ensureItem(s?.sopKey || "未归类");
+      return normalizeSession({
+        ...s,
+        itemId: item?.id || "",
+        itemName: item?.name || s?.sopKey || "未归类",
+        taskTitle: String((raw.tasks || []).find((t) => t?.id === s?.taskId)?.title || s?.sopKey || "练习").trim(),
+        goalProgress: s?.selfCompare === "better" ? "closer" : s?.selfCompare === "worse" ? "off" : s?.selfCompare === "same" ? "same" : "",
+      });
+    })
+    .filter((s) => s.result);
+
+  return {
+    ...base,
+    items: Array.from(itemByName.values()).filter((i) => i.name),
+    sessions,
+    stats: {
+      points: coerceInt(raw?.stats?.points, 0),
+      streak: coerceInt(raw?.stats?.streak, 0),
+    },
+    settings: {
+      defaultEstimateMin: coerceInt(raw?.settings?.defaultEstimateMin, 25),
+      completePoints: coerceInt(raw?.settings?.completePoints, 5),
+      failPoints: coerceInt(raw?.settings?.failPoints, -3),
+      streakResetOnFail: Boolean(raw?.settings?.streakResetOnFail ?? true),
+    },
+    updatedAt: raw?.updatedAt || nowIso(),
   };
+}
 
-  out.sops = {};
-  if (raw?.sops && typeof raw.sops === "object" && !Array.isArray(raw.sops)) {
-    for (const [k, v] of Object.entries(raw.sops)) {
-      if (!k || typeof k !== "string") continue;
-      if (!Array.isArray(v)) continue;
-      const steps = v.filter((s) => typeof s === "string").map((s) => s.trim()).filter(Boolean);
-      out.sops[k] = steps;
-    }
-  }
+export function sanitizeData(raw) {
+  if (!raw || typeof raw !== "object") return defaultData();
+  if (raw.schemaVersion !== 3 && (Array.isArray(raw.tasks) || raw.sops)) return migrateLegacy(raw);
 
-  out.sopLinks = {};
-  if (raw?.sopLinks && typeof raw.sopLinks === "object" && !Array.isArray(raw.sopLinks)) {
-    for (const [k, v] of Object.entries(raw.sopLinks)) {
-      if (!k || typeof k !== "string") continue;
-      if (!Array.isArray(v)) continue;
-      const links = v.filter((s) => typeof s === "string").map((s) => s.trim()).filter(Boolean);
-      out.sopLinks[k] = links;
-    }
-  }
+  const base = defaultData();
+  const items = (Array.isArray(raw.items) ? raw.items : []).map(normalizeItem).filter((i) => i.name);
+  const sessions = (Array.isArray(raw.sessions) ? raw.sessions : []).map(normalizeSession).filter((s) => s.result);
 
-  out.sopAutoOpenLinks = {};
-  if (raw?.sopAutoOpenLinks && typeof raw.sopAutoOpenLinks === "object" && !Array.isArray(raw.sopAutoOpenLinks)) {
-    for (const [k, v] of Object.entries(raw.sopAutoOpenLinks)) {
-      if (!k || typeof k !== "string") continue;
-      out.sopAutoOpenLinks[k] = Boolean(v);
-    }
-  }
-
-  out.tasks = Array.isArray(raw?.tasks) ? raw.tasks.filter((t) => t && typeof t === "object") : [];
-  out.tasks = out.tasks.map((t) => ({
-    id: String(t.id || ""),
-    title: String(t.title || "").trim(),
-    type: t.type === "repeat" || t.type === "light" ? t.type : "deep",
-    estimateMin: coerceInt(t.estimateMin, out.settings.defaultEstimateMin),
-    importance: t.importance === "urgent" ? "urgent" : "normal",
-    // v0 stored `url`; now supports multiple `links`.
-    links: Array.isArray(t.links)
-      ? t.links.filter((s) => typeof s === "string").map((s) => s.trim()).filter(Boolean)
-      : Array.isArray(t.urls)
-        ? t.urls.filter((s) => typeof s === "string").map((s) => s.trim()).filter(Boolean)
-        : typeof t.url === "string" && t.url.trim()
-          ? [t.url.trim()]
-          : [],
-    definitionOfDone: typeof t.definitionOfDone === "string" ? t.definitionOfDone.trim() : "",
-    // Optional "practice focus" shortcut for next time.
-    lastPracticeFocus: typeof t.lastPracticeFocus === "string" ? t.lastPracticeFocus.trim() : "",
-    // SOP is associated by "事项"/key (user-controlled); fallback can be task title on UI.
-    sopKey: typeof t.sopKey === "string" ? t.sopKey.trim() : "",
-    notes: Array.isArray(t.notes)
-      ? t.notes
-          .filter((n) => n && typeof n === "object" && typeof n.text === "string")
-          .map((n) => ({
-            id: String(n.id || ""),
-            text: String(n.text || "").trim(),
-            createdAt: typeof n.createdAt === "string" ? n.createdAt : nowIso(),
-          }))
-          .filter((n) => n.id.length > 0 && n.text.length > 0)
-      : [],
-    noteDraft: typeof t.noteDraft === "string" ? t.noteDraft : "",
-    status: t.status === "done" ? "done" : "todo",
-    order: coerceInt(t.order, 0),
-    createdAt: typeof t.createdAt === "string" ? t.createdAt : nowIso(),
-    updatedAt: typeof t.updatedAt === "string" ? t.updatedAt : nowIso(),
-    lastSkippedAt: typeof t.lastSkippedAt === "string" ? t.lastSkippedAt : "",
-  }));
-  out.tasks = out.tasks.filter((t) => t.title.length > 0 && t.id.length > 0);
-
-  out.sessions = Array.isArray(raw?.sessions)
-    ? raw.sessions.filter((s) => s && typeof s === "object")
-    : [];
-  out.sessions = out.sessions
-    .map((s) => ({
-      id: String(s.id || ""),
-      taskId: String(s.taskId || ""),
-      sopKey: typeof s.sopKey === "string" ? s.sopKey.trim() : "",
-      taskType: s.taskType === "repeat" || s.taskType === "light" ? s.taskType : "deep",
-      startedAt: typeof s.startedAt === "string" ? s.startedAt : "",
-      endedAt: typeof s.endedAt === "string" ? s.endedAt : "",
-      plannedMin: coerceInt(s.plannedMin, 0),
-      actualSec: coerceInt(s.actualSec, 0),
-      result: s.result === "fail" ? "fail" : s.result === "success" ? "success" : "",
-      practiceFocus: typeof s.practiceFocus === "string" ? s.practiceFocus.trim() : "",
-      failReason: typeof s.failReason === "string" ? s.failReason : "",
-      failTrigger: typeof s.failTrigger === "string" ? s.failTrigger : "",
-      selfCompare: typeof s.selfCompare === "string" ? s.selfCompare : "",
-    }))
-    .filter((s) => s.id.length > 0 && s.taskId.length > 0 && (s.result === "success" || s.result === "fail"));
-
-  out.lastTaskOrder = coerceInt(raw?.lastTaskOrder, base.lastTaskOrder);
-  out.updatedAt = typeof raw?.updatedAt === "string" ? raw.updatedAt : nowIso();
-
-  return out;
+  return {
+    ...base,
+    items,
+    sessions,
+    stats: {
+      points: coerceInt(raw?.stats?.points, 0),
+      streak: coerceInt(raw?.stats?.streak, 0),
+    },
+    settings: {
+      defaultEstimateMin: coerceInt(raw?.settings?.defaultEstimateMin, 25),
+      completePoints: coerceInt(raw?.settings?.completePoints, 5),
+      failPoints: coerceInt(raw?.settings?.failPoints, -3),
+      streakResetOnFail: Boolean(raw?.settings?.streakResetOnFail ?? true),
+    },
+    updatedAt: typeof raw?.updatedAt === "string" ? raw.updatedAt : nowIso(),
+  };
 }
 
 export function loadData() {
   try {
-    const s = localStorage.getItem(STORAGE_KEY);
-    if (!s) return defaultData();
-    const raw = JSON.parse(s);
-    return sanitizeLoadedData(raw);
+    const current = localStorage.getItem(STORAGE_KEY);
+    if (current) return sanitizeData(JSON.parse(current));
+
+    const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (legacy) return sanitizeData(JSON.parse(legacy));
+    return defaultData();
   } catch {
     return defaultData();
   }
 }
 
+export function prepareDataForSave(data) {
+  return sanitizeData({ ...data, updatedAt: nowIso(), schemaVersion: 3 });
+}
+
 export function saveData(data) {
-  const out = { ...data, updatedAt: nowIso(), schemaVersion: 2 };
+  const out = prepareDataForSave(data);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(out));
+  return out;
 }
 
 export function clearData() {
   localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(LEGACY_STORAGE_KEY);
 }
 
-export function newId(prefix = "t") {
+export async function loadRemoteData() {
+  if (location.protocol === "file:") return null;
+  try {
+    const resp = await fetch(REMOTE_ENDPOINT, { cache: "no-store" });
+    if (!resp.ok) return null;
+    const raw = await resp.json();
+    if (!raw) return null;
+    return sanitizeData(raw);
+  } catch {
+    return null;
+  }
+}
+
+export async function saveRemoteData(data) {
+  if (location.protocol === "file:") return false;
+  try {
+    const out = prepareDataForSave(data);
+    const resp = await fetch(REMOTE_ENDPOINT, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(out),
+    });
+    return resp.ok;
+  } catch {
+    return false;
+  }
+}
+
+export function newId(prefix = "id") {
   const rnd = Math.random().toString(16).slice(2);
   return `${prefix}_${Date.now().toString(16)}_${rnd}`;
 }
