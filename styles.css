@@ -438,6 +438,123 @@ button:disabled {
   line-height: 1.5;
 }
 
+.practiceShell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 16px;
+  min-height: calc(100vh - 44px);
+}
+
+.practiceTop {
+  display: grid;
+  grid-template-columns: minmax(150px, 220px) minmax(0, 1fr) auto;
+  gap: 20px;
+  align-items: center;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border));
+  border-left: 5px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: 0 14px 34px rgba(32, 44, 38, 0.08);
+}
+
+.timer--focus {
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.practiceTop__main {
+  min-width: 0;
+}
+
+.practiceTop__actions {
+  flex-wrap: nowrap;
+}
+
+.practiceWorkspace,
+.practiceDesk {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.9fr) minmax(420px, 1.1fr) minmax(280px, 0.58fr);
+  gap: 16px;
+  align-items: stretch;
+  min-height: 0;
+}
+
+.practicePanel {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.practicePanel .checklist {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+  align-content: start;
+}
+
+.practiceTools {
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 16px;
+  min-height: 0;
+}
+
+.practiceTools .card + .card {
+  margin-top: 0;
+}
+
+.practiceTools .linkAdd {
+  grid-template-columns: 1fr;
+}
+
+.practiceTool {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.practiceTool--links {
+  display: flex;
+  flex-direction: column;
+}
+
+.practiceTool--links .list {
+  min-height: 0;
+  overflow: auto;
+}
+
+.practiceNotes {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+  line-height: 1.6;
+  resize: none;
+}
+
+.sopStep {
+  transition: border-color 140ms ease, background 140ms ease;
+  align-items: flex-start;
+}
+
+.sopStep .meta {
+  margin-bottom: 6px;
+}
+
+.sopStep--current {
+  border-color: color-mix(in srgb, var(--accent) 62%, var(--border));
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel2));
+}
+
+.linkAdd {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.7fr) minmax(220px, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
 .metricGrid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -591,8 +708,21 @@ textarea {
   padding: 20px 16px 56px;
 }
 
+.focusMode {
+  --bg: #eef1ed;
+  --panel: #fffdfa;
+  --panel2: #f0f3ef;
+  --panel3: #ffffff;
+  --text: #181c1a;
+  --muted: #647069;
+  --border: rgba(37, 51, 44, 0.14);
+  --shadow: 0 18px 44px rgba(30, 42, 36, 0.1);
+}
+
 .focusMode body {
-  background: #000;
+  background:
+    linear-gradient(180deg, rgba(82, 199, 184, 0.1), transparent 240px),
+    var(--bg);
 }
 
 .focusMode .topbar {
@@ -600,27 +730,28 @@ textarea {
 }
 
 .focusMode .container {
-  max-width: 900px;
+  max-width: 1360px;
+  padding: 28px 24px;
 }
 
 .timer {
   font-family: var(--mono);
-  font-size: clamp(42px, 8vw, 72px);
+  font-size: clamp(42px, 5vw, 62px);
   font-weight: 900;
-  letter-spacing: 1px;
+  letter-spacing: 0;
 }
 
 .checklist {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 8px;
+  gap: 10px;
 }
 
 .check {
   display: flex;
   gap: 10px;
   align-items: flex-start;
-  padding: 10px 12px;
+  padding: 12px;
   background: var(--panel2);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -629,6 +760,44 @@ textarea {
 .check input {
   width: auto;
   margin-top: 2px;
+}
+
+@media (max-width: 1100px) {
+  .practiceWorkspace,
+  .practiceDesk {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .practiceTools {
+    grid-column: 1 / -1;
+    grid-template-columns: minmax(0, 1fr) minmax(260px, 0.55fr);
+  }
+}
+
+@media (max-width: 900px) {
+  .practiceTop,
+  .practiceWorkspace,
+  .practiceDesk,
+  .practiceTools,
+  .linkAdd {
+    grid-template-columns: 1fr;
+  }
+
+  .practiceTools {
+    grid-column: auto;
+  }
+
+  .practiceTop__actions {
+    justify-content: flex-start;
+  }
+
+  .practicePanel {
+    min-height: 300px;
+  }
+
+  .practiceNotes {
+    min-height: 220px;
+  }
 }
 
 @media (max-width: 560px) {
@@ -663,7 +832,12 @@ textarea {
   .stepRow,
   .linkRow,
   .inboxRow,
-  .metricGrid {
+  .metricGrid,
+  .practiceWorkspace,
+  .practiceTop,
+  .practiceDesk,
+  .practiceTools,
+  .linkAdd {
     grid-template-columns: 1fr;
   }
 

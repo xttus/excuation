@@ -1,4 +1,4 @@
-import { clearData, loadData, loadRemoteData, newId, saveData, saveRemoteData } from "./storage.js";
+import { clearData, hasLocalData, loadData, loadRemoteState, newId, saveData, saveRemoteData } from "./storage.js";
 
 const appEl = document.getElementById("app");
 const statsEl = document.getElementById("stats");
@@ -10,6 +10,7 @@ const state = {
   view: "home", // home | items | focus | settings
   session: null,
   sync: "local",
+  localHadData: hasLocalData(),
 };
 
 let focusTicker = null;
@@ -57,6 +58,7 @@ function toast(msg) {
 
 function persist() {
   state.data = saveData(state.data);
+  state.localHadData = true;
   renderStats();
   scheduleRemoteSave();
 }
@@ -69,6 +71,10 @@ function isRemoteNewer(remote, local) {
   return remoteTime > localTime;
 }
 
+function hasMeaningfulData(data) {
+  return Boolean((data?.items || []).length || (data?.practices || []).length || (data?.inbox || []).length);
+}
+
 function scheduleRemoteSave() {
   window.clearTimeout(remoteSaveTimer);
   remoteSaveTimer = window.setTimeout(async () => {
@@ -79,30 +85,33 @@ function scheduleRemoteSave() {
 }
 
 async function hydrateRemoteData() {
-  const remote = await loadRemoteData();
-  if (!remote) {
+  const remoteState = await loadRemoteState();
+  if (!remoteState.reachable) {
     state.sync = "offline";
     renderStats();
-    scheduleRemoteSave();
     return;
   }
-  if (isRemoteNewer(remote, state.data)) {
+
+  const remote = remoteState.data;
+  if (remote && (!state.localHadData || !hasMeaningfulData(state.data) || isRemoteNewer(remote, state.data))) {
     state.data = remote;
     saveData(state.data);
+    state.localHadData = true;
     state.sync = "synced";
     renderStats();
     render();
     toast("已同步共享数据");
     return;
   }
+
   state.sync = "synced";
   renderStats();
-  scheduleRemoteSave();
+  if (hasMeaningfulData(state.data)) scheduleRemoteSave();
 }
 
 function renderStats() {
   const { points, streak } = state.data.stats;
-  const syncLabel = state.sync === "synced" ? "已同步" : "本地";
+  const syncLabel = state.sync === "synced" ? "已连接共享服务" : "未连接共享服务";
   statsEl.replaceChildren(
     h("div", { class: "pill" }, "points ", h("code", { text: String(points) })),
     h("div", { class: "pill" }, "streak ", h("code", { text: String(streak) })),
@@ -207,8 +216,36 @@ function linkUrl(link) {
   return typeof link === "string" ? link : String(link?.url || "").trim();
 }
 
+function linkTitle(link) {
+  return typeof link === "string" ? "" : String(link?.title || "").trim();
+}
+
 function linkId(link) {
   return typeof link === "string" ? linkUrl(link) : String(link?.id || link?.url || "").trim();
+}
+
+function linkLabel(link) {
+  const title = linkTitle(link);
+  if (title) return title;
+  const url = linkUrl(link);
+  try {
+    return new URL(toOpenableUrl(url) || url).hostname || url;
+  } catch {
+    return url || "未命名链接";
+  }
+}
+
+function parseLinkLine(line) {
+  const raw = String(line || "").trim();
+  if (!raw) return null;
+  const parts = raw.split("|");
+  if (parts.length >= 2) {
+    const title = parts.shift().trim();
+    const url = parts.join("|").trim();
+    if (!url) return null;
+    return { ...createLink(url), title };
+  }
+  return createLink(raw);
 }
 
 function createStep(text) {
@@ -409,7 +446,7 @@ function openItemEditor(item) {
   let draggingStepIndex = null;
   const stepsList = h("div", { class: "stepEditor" });
   const newStepInput = h("input", { placeholder: "新增步骤或检查，例如：@ 开头是否有具体场景？" });
-  const linksInput = h("textarea", { text: (initial.links || []).map(linkUrl).join("\n"), placeholder: "共享链接：每行一个，例如文档、素材库、后台" });
+  const linksInput = h("textarea", { text: (initial.links || []).map((l) => `${linkTitle(l) ? `${linkTitle(l)} | ` : ""}${linkUrl(l)}`).join("\n"), placeholder: "共享链接：每行一个；推荐格式：选题库 | https://..." });
   const estimateInput = h("input", { type: "number", min: "1", value: String(initial.defaultEstimateMin || state.data.settings.defaultEstimateMin) });
 
   function moveStep(from, to) {
@@ -500,7 +537,7 @@ function openItemEditor(item) {
             name,
             goal: goalInput.value.trim(),
             steps: stepsDraft.map((s, order) => (typeof s === "string" ? createStep(s) : { ...s, order })).filter((s) => stepText(s)),
-            links: normalizeLinks(linksInput.value).map((url, order) => ({ ...createLink(url), order })),
+            links: normalizeLines(linksInput.value).map(parseLinkLine).filter(Boolean).map((link, order) => ({ ...link, order })),
             defaultEstimateMin: Math.max(1, Number.parseInt(estimateInput.value || "1", 10)),
             updatedAt: new Date().toISOString(),
           });
@@ -1016,6 +1053,7 @@ function renderSettings() {
         if (!ok) return;
         clearData();
         state.data = loadData();
+        state.localHadData = false;
         state.session = null;
         persist();
         toast("已清空");
@@ -1054,12 +1092,13 @@ function renderFocus() {
     return h("div");
   }
 
-  const timerEl = h("div", { class: "timer", text: "00:00" });
-  const noteInput = h("textarea", { placeholder: "随手记：发现、卡点、下次提醒", text: sess.noteDraft || "" });
+  const timerEl = h("div", { class: "timer timer--focus", text: "00:00" });
+  const noteInput = h("textarea", { class: "practiceNotes", placeholder: "记录发现、卡点、下次提醒。这里会进入复盘和练习记录。", text: sess.noteDraft || "" });
   noteInput.addEventListener("input", () => {
     state.session.noteDraft = noteInput.value;
   });
-  const linkInput = h("input", { placeholder: "练习中发现的新链接，粘贴后加入事项" });
+  const linkTitleInput = h("input", { placeholder: "链接名称，例如：草稿文档" });
+  const linkInput = h("input", { placeholder: "链接地址" });
   const linksList = h("div", { class: "list" });
   const distractInput = h("input", { placeholder: "分心了？把想到的事丢进收集箱" });
 
@@ -1070,7 +1109,7 @@ function renderFocus() {
             h(
               "div",
               { class: "linkRow" },
-              h("div", { class: "muted", text: linkUrl(link) }),
+              h("div", {}, h("div", { class: "taskTitle", text: linkLabel(link) }), h("div", { class: "muted", text: linkUrl(link) })),
               h(
                 "div",
                 { class: "buttons" },
@@ -1096,10 +1135,12 @@ function renderFocus() {
       return;
     }
     const newLink = createLink(value);
+    newLink.title = linkTitleInput.value.trim();
     item.links = [...(item.links || []), { ...newLink, order: item.links?.length || 0 }];
     item.updatedAt = new Date().toISOString();
     upsertItem(item);
     state.session.addedLinkIds = Array.from(new Set([...(state.session.addedLinkIds || []), newLink.id]));
+    linkTitleInput.value = "";
     linkInput.value = "";
     rebuildFocusLinks();
     toast("链接已加入事项");
@@ -1117,10 +1158,30 @@ function renderFocus() {
 
   rebuildFocusLinks();
 
+  function currentStepIndex() {
+    const ids = new Set(sess.checkedStepIds || []);
+    return (sess.useSteps ? item.steps || [] : []).findIndex((step) => !ids.has(stepId(step)));
+  }
+
+  function rebuildChecklistHeader() {
+    const total = sess.useSteps ? (item.steps || []).length : 0;
+    const checked = (sess.checkedStepIds || []).length;
+    stepProgressEl.textContent = `${checked} / ${total}`;
+  }
+
+  function refreshChecklistState() {
+    rebuildChecklistHeader();
+    const current = currentStepIndex();
+    Array.from(checklist.children).forEach((row, index) => {
+      row.classList.toggle("sopStep--current", index === current);
+    });
+  }
+
+  const stepProgressEl = h("span", { class: "tag", text: "0 / 0" });
   const checklist = h(
     "div",
     { class: "checklist" },
-    ...(sess.useSteps ? item.steps || [] : []).map((step) => {
+    ...(sess.useSteps ? item.steps || [] : []).map((step, index) => {
       const id = stepId(step);
       const input = h("input", {
         type: "checkbox",
@@ -1130,11 +1191,20 @@ function renderFocus() {
           if (e.target.checked) current.add(id);
           else current.delete(id);
           state.session.checkedStepIds = Array.from(current);
+          refreshChecklistState();
         },
       });
-      return h("label", { class: "check" }, input, h("div", { class: "taskTitle", text: stepText(step) }));
+      const isCurrent = index === currentStepIndex();
+      const typeLabel = step?.type === "check" ? "检查" : step?.type === "warning" ? "提醒" : step?.type === "improvement" ? "提升" : "动作";
+      return h(
+        "label",
+        { class: `check sopStep ${isCurrent ? "sopStep--current" : ""}` },
+        input,
+        h("div", {}, h("div", { class: "meta" }, h("span", { class: "tag", text: `${index + 1}` }), h("span", { class: "tag", text: typeLabel })), h("div", { class: "taskTitle", text: stepText(step) }))
+      );
     })
   );
+  rebuildChecklistHeader();
 
   const completeBtn = h(
     "button",
@@ -1164,44 +1234,56 @@ function renderFocus() {
 
   const view = h(
     "div",
-    { class: "col" },
+    { class: "practiceShell" },
     h(
-      "div",
-      { class: "card" },
-      h("div", { class: "muted", text: "执行态（无暂停）" }),
+      "section",
+      { class: "practiceTop" },
       timerEl,
-      h("div", { class: "h1", text: sess.taskTitle }),
-      h("div", { class: "muted", text: `事项：${item.name}` }),
-      item.goal ? h("div", { class: "focusLine" }, h("span", { text: "长期目标" }), h("strong", { text: item.goal })) : null,
-      sess.focus ? h("div", { class: "doneLine" }, h("span", { text: "本次练习" }), h("strong", { text: sess.focus })) : null,
-      checklist.children.length ? h("div", { class: "divider" }) : null,
-      checklist.children.length ? h("div", { class: "muted", text: "步骤与检查" }) : null,
-      checklist.children.length ? checklist : null,
-      h("div", { class: "divider" }),
-      h("div", { class: "buttons" }, completeBtn, abandonBtn)
+      h("div", { class: "practiceTop__main" }, h("div", { class: "eyebrow", text: `事项：${item.name}` }), h("div", { class: "h1", text: sess.taskTitle }), sess.focus ? h("div", { class: "muted", text: `本次练习：${sess.focus}` }) : null, item.goal ? h("div", { class: "muted", text: `长期目标：${item.goal}` }) : null),
+      h("div", { class: "buttons practiceTop__actions" }, completeBtn, abandonBtn)
     ),
     h(
-      "div",
-      { class: "card" },
-      h("div", { class: "h1", text: "共享链接" }),
-      h("div", { class: "divider" }),
-      linksList,
-      h("div", { class: "divider" }),
-      h("div", { class: "inlineAdd" }, linkInput, h("button", { class: "btn", onclick: addFocusLink }, "+ 加入事项"))
-    ),
-    h(
-      "div",
-      { class: "card" },
-      h("div", { class: "h1", text: "收集箱" }),
-      h("div", { class: "muted", text: "想到别的事，先记下，不打断当前练习。" }),
-      h("div", { class: "divider" }),
-      h("div", { class: "inlineAdd" }, distractInput, h("button", { class: "btn", onclick: captureDistractor }, "+ 放进收集箱"))
-    ),
-    h("div", { class: "card" }, h("div", { class: "h1", text: "练习笔记" }), h("div", { class: "divider" }), noteInput)
+      "section",
+      { class: "practiceWorkspace" },
+      h(
+        "div",
+        { class: "card practicePanel practicePanel--steps" },
+        h("div", { class: "row" }, h("div", { class: "h1", text: "步骤与检查" }), stepProgressEl),
+        h("div", { class: "divider" }),
+        checklist.children.length ? checklist : h("div", { class: "muted", text: "该事项还没有步骤与检查。" })
+      ),
+      h(
+        "div",
+        { class: "card practicePanel practicePanel--notes" },
+        h("div", { class: "h1", text: "练习笔记" }),
+        h("div", { class: "divider" }),
+        noteInput
+      ),
+      h(
+      "aside",
+      { class: "practiceTools" },
+      h(
+        "div",
+        { class: "card practiceTool practiceTool--links" },
+        h("div", { class: "h1", text: "共享链接" }),
+        h("div", { class: "divider" }),
+        linksList,
+        h("div", { class: "divider" }),
+        h("div", { class: "linkAdd" }, linkTitleInput, linkInput, h("button", { class: "btn", onclick: addFocusLink }, "+ 加入事项"))
+      ),
+      h(
+        "div",
+        { class: "card practiceTool practiceTool--capture" },
+        h("div", { class: "h1", text: "分心捕捉" }),
+        h("div", { class: "muted", text: "想到别的事，先记下，不打断当前练习。" }),
+        h("div", { class: "divider" }),
+        h("div", { class: "inlineAdd" }, distractInput, h("button", { class: "btn", onclick: captureDistractor }, "+ 放进收集箱"))
+      )
+      )
+    )
   );
 
-  stopFocusTicker();
-  focusTicker = window.setInterval(() => {
+  function updateFocusTimer() {
     const left = sess.endsAt - Date.now();
     timerEl.textContent = formatMs(left);
     document.title = `${formatMs(left)} · ${sess.taskTitle}`;
@@ -1209,7 +1291,11 @@ function renderFocus() {
       stopFocusTicker();
       openFailReview(item, buildPracticeBase(item), "timeout");
     }
-  }, 250);
+  }
+
+  stopFocusTicker();
+  updateFocusTimer();
+  focusTicker = window.setInterval(updateFocusTimer, 250);
 
   return view;
 }

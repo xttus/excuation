@@ -1,7 +1,18 @@
 /* Minimal offline cache for static assets (served over http/https). */
 // Bump this to invalidate old caches when shipping changes.
-const CACHE_NAME = "execpanel-mvp-v15";
-const ASSETS = ["./", "./index.html", "./styles.css", "./app.js", "./storage.js", "./manifest.webmanifest"];
+const CACHE_NAME = "execpanel-mvp-v20";
+const ASSETS = [
+  "./",
+  "./index.html",
+  "./styles.css",
+  "./app.js",
+  "./storage.js",
+  "./dataModel.js",
+  "./localStore.js",
+  "./remoteStore.js",
+  "./exportStore.js",
+  "./manifest.webmanifest",
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -29,6 +40,10 @@ self.addEventListener("fetch", (event) => {
     (async () => {
       const url = new URL(request.url);
       const sameOrigin = url.origin === self.location.origin;
+
+      if (sameOrigin && url.pathname.startsWith("/api/")) {
+        return fetch(request);
+      }
 
       // For core assets, prefer network-first so updates are visible without manual cache clearing.
       if (sameOrigin && ASSETS.some((p) => url.pathname.endsWith(p.replace("./", "/")) || (p === "./" && url.pathname === "/"))) {

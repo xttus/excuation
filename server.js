@@ -1,9 +1,10 @@
 const http = require("http");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const ROOT = __dirname;
-const PORT = Number.parseInt(process.env.PORT || "5173", 10);
+const START_PORT = Number.parseInt(process.env.PORT || "5173", 10);
 const HOST = process.env.HOST || "0.0.0.0";
 const DATA_DIR = path.join(ROOT, "data");
 const DATA_FILE = path.join(DATA_DIR, "execpanel-v4.json");
@@ -92,7 +93,12 @@ function serveStatic(req, res) {
   if (pathname === "/") pathname = "/index.html";
 
   const file = path.normalize(path.join(ROOT, pathname));
-  if (!file.startsWith(ROOT) || file.startsWith(DATA_DIR)) {
+  const rootRelative = path.relative(ROOT, file);
+  const dataRelative = path.relative(DATA_DIR, file);
+  const outsideRoot = rootRelative.startsWith("..") || path.isAbsolute(rootRelative);
+  const insideDataDir = dataRelative === "" || (!dataRelative.startsWith("..") && !path.isAbsolute(dataRelative));
+
+  if (outsideRoot || insideDataDir) {
     res.writeHead(403);
     res.end("Forbidden");
     return;
@@ -111,15 +117,63 @@ function serveStatic(req, res) {
   });
 }
 
-const server = http.createServer((req, res) => {
-  if (req.url === "/api/data") {
+function createAppServer() {
+  return http.createServer((req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  if (url.pathname === "/api/health") {
+    sendJson(res, 200, { ok: true, mode: "shared", dataFile: DATA_FILE });
+    return;
+  }
+  if (url.pathname === "/api/data") {
     handleDataApi(req, res);
     return;
   }
   serveStatic(req, res);
-});
+  });
+}
 
-server.listen(PORT, HOST, () => {
-  console.log(`Execution Panel shared server: http://localhost:${PORT}/`);
-  console.log("Use your LAN IP on other devices, for example: http://192.168.x.x:5173/");
-});
+function getLanAddresses() {
+  return Object.entries(os.networkInterfaces())
+    .flatMap(([name, infos]) =>
+      (infos || [])
+        .filter((info) => info && info.family === "IPv4" && !info.internal)
+        .map((info) => ({
+          name,
+          address: info.address,
+          virtual: /vEthernet|VMware|VirtualBox|Loopback|WSL|Docker/i.test(name),
+        }))
+    )
+    .sort((a, b) => Number(a.virtual) - Number(b.virtual));
+}
+
+function listen(port, attemptsLeft = 10) {
+  const server = createAppServer();
+
+  server.once("error", (err) => {
+    if ((err.code === "EADDRINUSE" || err.code === "EACCES") && attemptsLeft > 0) {
+      console.log(`Port ${port} is busy, trying ${port + 1}...`);
+      listen(port + 1, attemptsLeft - 1);
+      return;
+    }
+    console.error("Failed to start shared server:", err.message);
+    process.exitCode = 1;
+  });
+
+  server.listen(port, HOST, () => {
+    const lan = getLanAddresses();
+    console.log(`Execution Panel shared server: http://localhost:${port}/`);
+    if (lan.length) {
+      console.log("Open one of these URLs on your phone. Prefer Wi-Fi/LAN, avoid virtual adapters:");
+      for (const item of lan) {
+        const note = item.virtual ? " (virtual adapter, usually not for phone)" : ` (${item.name})`;
+        console.log(`  http://${item.address}:${port}/${note}`);
+      }
+    } else {
+      console.log(`Use your LAN IP on other devices, for example: http://192.168.x.x:${port}/`);
+    }
+    console.log(`Health check: http://localhost:${port}/api/health`);
+    console.log("On your phone, open the same LAN URL with /api/health first. It should show {\"ok\":true}.");
+  });
+}
+
+listen(START_PORT);
