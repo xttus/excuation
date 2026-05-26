@@ -1,6 +1,6 @@
 /* Minimal offline cache for static assets (served over http/https). */
 // Bump this to invalidate old caches when shipping changes.
-const CACHE_NAME = "execpanel-mvp-v20";
+const CACHE_NAME = "execpanel-mvp-v22";
 const ASSETS = [
   "./",
   "./index.html",

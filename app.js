@@ -15,6 +15,7 @@ const state = {
 
 let focusTicker = null;
 let remoteSaveTimer = null;
+let remotePollTimer = null;
 
 const FAIL_REASONS = [
   { code: "difficulty_misjudge", label: "难度判断失误" },
@@ -75,6 +76,10 @@ function hasMeaningfulData(data) {
   return Boolean((data?.items || []).length || (data?.practices || []).length || (data?.inbox || []).length);
 }
 
+function sameDataVersion(a, b) {
+  return String(a?.updatedAt || "") === String(b?.updatedAt || "");
+}
+
 function scheduleRemoteSave() {
   window.clearTimeout(remoteSaveTimer);
   remoteSaveTimer = window.setTimeout(async () => {
@@ -84,7 +89,7 @@ function scheduleRemoteSave() {
   }, 350);
 }
 
-async function hydrateRemoteData() {
+async function hydrateRemoteData({ silent = false } = {}) {
   const remoteState = await loadRemoteState();
   if (!remoteState.reachable) {
     state.sync = "offline";
@@ -93,20 +98,34 @@ async function hydrateRemoteData() {
   }
 
   const remote = remoteState.data;
-  if (remote && (!state.localHadData || !hasMeaningfulData(state.data) || isRemoteNewer(remote, state.data))) {
+  if (remote && hasMeaningfulData(remote) && !sameDataVersion(remote, state.data)) {
     state.data = remote;
     saveData(state.data);
     state.localHadData = true;
     state.sync = "synced";
     renderStats();
     render();
-    toast("已同步共享数据");
+    if (!silent) toast("已同步共享数据");
     return;
   }
 
   state.sync = "synced";
   renderStats();
-  if (hasMeaningfulData(state.data)) scheduleRemoteSave();
+  if (!remote && hasMeaningfulData(state.data)) {
+    const ok = await saveRemoteData(state.data);
+    state.sync = ok ? "synced" : "offline";
+    renderStats();
+    if (ok && !silent) toast("已把本机数据上传到共享服务");
+    return;
+  }
+}
+
+function startRemotePolling() {
+  window.clearInterval(remotePollTimer);
+  remotePollTimer = window.setInterval(() => {
+    if (state.view === "focus") return;
+    hydrateRemoteData({ silent: true });
+  }, 5000);
 }
 
 function renderStats() {
@@ -1322,4 +1341,5 @@ function registerServiceWorker() {
 renderStats();
 render();
 hydrateRemoteData();
+startRemotePolling();
 registerServiceWorker();
